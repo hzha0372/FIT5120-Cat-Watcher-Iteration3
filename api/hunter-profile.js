@@ -5,8 +5,10 @@ import { Pool } from 'pg'
 // Vercel entry: /api/hunter-profile.
 /*
   Module Notes
-  - Calculates the profile from submitted answers instead of trusting frontend labels.
-  - Reads cat name, postcode, prey rate, and species risk rows from the PostgreSQL database.
+  - Calculates the profile from submitted answers instead of trusting frontend labels or cached browser state.
+  - Reads cat name/postcode from users, suburb display fields from suburb_demographics, prey rate from cats_behaviour_stats, and species risk rows from species_cache.
+  - Returns every displayed numeric result used by HunterProfileView.vue: score, roamingHours, preyRatePerDay, recordCount, and monthlyEncounters.
+  - Keeps profile descriptions/actions as deterministic rule copy because the database screenshots do not include a profile-copy table.
   - Infers prey category from species names because species_cache does not expose a taxon_type column.
 */
 /* eslint-env node */
@@ -24,6 +26,7 @@ const PREY_RATE_FALLBACK = 0.0667
 
 let pool = null
 
+// Numeric coercion helpers keep API responses stable when PostgreSQL numeric columns arrive as strings.
 const toNum = (value, fallback = 0) => {
   const n = Number(value)
   return Number.isFinite(n) ? n : fallback
@@ -36,6 +39,7 @@ const toInt = (value, fallback = 0) => {
 
 const cleanText = (value) => String(value || '').trim()
 
+// Reuse one connection pool across serverless/Vite requests and prefer environment variables when provided.
 const getPool = () => {
   if (pool) return pool
 
@@ -65,6 +69,7 @@ const getPool = () => {
   return pool
 }
 
+// Local Vite middleware and Vercel serverless functions expose JSON bodies differently, so both shapes are supported.
 const readJsonBody = async (req) => {
   if (req.body && typeof req.body === 'object') return req.body
   if (typeof req.body === 'string') return JSON.parse(req.body || '{}')
@@ -78,6 +83,7 @@ const readJsonBody = async (req) => {
   return text ? JSON.parse(text) : {}
 }
 
+// Weighted scoring model for AC9.1. The frontend sends only answer keys; this table owns the score and display labels.
 const answerWeights = {
   timing: {
     duskDawn: { score: 4, label: 'Dusk and dawn' },
@@ -111,6 +117,7 @@ const answerWeights = {
   },
 }
 
+// Static profile copy returned with the calculated key. Numeric risk values are still database-derived below.
 const profileText = {
   opportunistic: {
     type: 'Opportunistic Hunter',
@@ -162,6 +169,7 @@ const profileText = {
   },
 }
 
+// All five questions must match the known answerWeights keys before any profile calculation or database query happens.
 const validateAnswers = (answers) => {
   const required = ['timing', 'stalking', 'preyHistory', 'roamingHours', 'habitat']
   for (const key of required) {
@@ -171,6 +179,7 @@ const validateAnswers = (answers) => {
   }
 }
 
+// Calculate the score/profile server-side so a manipulated browser payload cannot choose its own Hunter Profile.
 const calculateProfile = (answers) => {
   validateAnswers(answers)
 
@@ -206,6 +215,7 @@ const calculateProfile = (answers) => {
   }
 }
 
+// Load the logged-in cat owner from users. userId is preferred; postcode is only a fallback for older/local payloads.
 const getUser = async (db, { userId, postcode }) => {
   const result = await db.query(
     `SELECT id,
@@ -223,6 +233,7 @@ const getUser = async (db, { userId, postcode }) => {
   return result.rows?.[0] || null
 }
 
+// Get the Victorian suburb/LGA name for the user's postcode from suburb_demographics.
 const getLocation = async (db, postcode) => {
   const result = await db.query(
     `SELECT TRIM(postcode) AS postcode,
@@ -239,6 +250,7 @@ const getLocation = async (db, postcode) => {
   return result.rows?.[0] || null
 }
 
+// Build SQL conditions that approximate the profile's prey category from species_cache names because no taxon_type column exists.
 const preyCategorySql = (category) => {
   if (category === 'Bird') {
     return `(vernacular_name ~* '(bird|duck|parrot|cockatoo|lorikeet|rosella|owl|eagle|hawk|falcon|goshawk|wren|finch|honeyeater|swallow|teal|dove|pigeon|raven|magpie|wagtail|warbler|gull|swan|coot|snipe|quail|rail|heron|ibis|egret|bittern|tern|sandpiper|greenshank|goose)'
@@ -258,6 +270,7 @@ const preyCategorySql = (category) => {
   return 'TRUE'
 }
 
+// Return the top three FFG-listed species for the user's postcode, ordered by conservation severity and local record count.
 const getLocalThreatenedSpecies = async (db, postcode, category) => {
   const baseParams = [postcode]
   const categoryCondition = preyCategorySql(category)
@@ -298,7 +311,7 @@ const getLocalThreatenedSpecies = async (db, postcode, category) => {
 
   let result = await runQuery(categoryCondition)
 
-  // Keep the postcode requirement, but relax prey category if the selected hunting style has no exact category match.
+  // Keep the postcode requirement, but relax prey category if the selected hunting style has no exact category match in species_cache.
   if (!result.rows?.length && categoryCondition !== 'TRUE') {
     result = await runQuery('TRUE')
   }
@@ -312,6 +325,7 @@ const getLocalThreatenedSpecies = async (db, postcode, category) => {
   }))
 }
 
+// Cat Tracker SA prey rate is stored in cats_behaviour_stats as prey_per_day; fallback only protects old DB snapshots.
 const getPreyRate = async (db) => {
   const result = await db.query(
     `SELECT stat_value, source, notes
@@ -328,6 +342,7 @@ const getPreyRate = async (db) => {
   }
 }
 
+// Main endpoint: validates answers, reads all required DB rows, calculates the AC9.1 encounter estimate, and returns one view model.
 export default async function hunterProfileHandler(req, res) {
   try {
     if ((req.method || 'POST').toUpperCase() !== 'POST') {
@@ -342,6 +357,7 @@ export default async function hunterProfileHandler(req, res) {
     const profile = calculateProfile(answers)
     const db = getPool()
 
+    // User identity and postcode come from the database, not from editable frontend display text.
     const user = userId
       ? await getUser(db, { userId, postcode: null })
       : await getUser(db, { userId: null, postcode: fallbackPostcode || null })
@@ -351,12 +367,14 @@ export default async function hunterProfileHandler(req, res) {
     }
 
     const postcode = cleanText(user.postcode)
+    // Independent DB reads can run in parallel: location label, prey-rate statistic, and local species risk rows.
     const [location, preyRate, species] = await Promise.all([
       getLocation(db, postcode),
       getPreyRate(db),
       getLocalThreatenedSpecies(db, postcode, profile.primaryPreyCategory),
     ])
 
+    // AC9.1 formula: Cat Tracker SA prey_per_day x user answer roaming_hours / 24 x 30 days.
     const monthlyEncounters = Number((preyRate.value * (profile.roamingHours / 24) * 30).toFixed(2))
 
     res.status(200).json({

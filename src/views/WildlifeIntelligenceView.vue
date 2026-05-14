@@ -1,17 +1,21 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import LineIcon from '../components/LineIcon.vue'
 import { getCurrentUser } from '../utils/auth'
 
 /*
   Wildlife Intelligence View Responsibilities
   - Resolves postcode/suburb input through the same Victorian suburb lookup pattern as the other search pages.
-  - Loads nearby verified and self-reported threatened species data from /api/wildlife-intelligence.
-  - Presents database-backed prediction cards, activity hotspots, alert feed cards, and no-photo report submission.
-  - Keeps formula notes visible so users can see how species_cache, species_sightings, and reserves data drive the page.
+  - Does not auto-analyze on mount; the user must type a postcode/suburb and click Analyze before numeric results render.
+  - Loads numeric wildlife data from /api/wildlife-intelligence after Analyze: record counts, 5km distance values, 30-day sightings, predation percentages, nearest reserve distances, and hotspot severity.
+  - Keeps Wikipedia image lookup as a visual enhancement only; images are not used for any score, count, percentage, distance, or database decision.
+  - Presents database-backed prediction cards, activity hotspots, and the Neighbour Wildlife Alert Feed from species_cache, species_sightings, suburb_demographics, and reserves.
+  - Keeps the historical-data note visible by default, while avoiding a hard-coded postcode/suburb until the user analyzes an entered location.
 */
 
 const user = ref(getCurrentUser())
+
+// View state: predictions/hotspots are hidden until payload is populated by an explicit Analyze request.
 const activeTab = ref('predictions')
 const loading = ref(false)
 const feedError = ref('')
@@ -19,12 +23,14 @@ const reportError = ref('')
 const reportSuccess = ref('')
 const payload = ref(null)
 
+// Search state mirrors the Risk Map style: no default input text, suggestions come from suburb_demographics.
 const postcodeInput = ref('')
 const activePostcode = ref(String(user.value?.postcode || '').trim())
 const selectedLocation = ref(null)
 const suburbSuggestions = ref([])
 const suburbLoading = ref(false)
 
+// No-photo report state is kept for the API-backed report flow, but the current page layout does not expose the button.
 const reportOpen = ref(false)
 const speciesOptions = ref([])
 const speciesLoading = ref(false)
@@ -35,6 +41,8 @@ const reportLocationInput = ref('')
 const selectedReportLocation = ref(null)
 const reportSuggestions = ref([])
 const reportLocationLoading = ref(false)
+
+// Visual-only image cache. These URLs never drive numeric wildlife intelligence values.
 const cardImageUrls = ref({})
 
 let suburbTimer = null
@@ -44,6 +52,8 @@ let reportLocationTimer = null
 const sightings = computed(() => payload.value?.sightings || [])
 const predictionItems = computed(() => payload.value?.predictions || [])
 const hotspotItems = computed(() => payload.value?.hotspots || [])
+
+// The analyzed user/location object comes from the API after suburb_demographics resolves the searched postcode.
 const feedUser = computed(() => payload.value?.user || user.value || {})
 const hasAnalyzed = computed(() => Boolean(payload.value?.user?.postcode))
 const selectedSpecies = computed(
@@ -52,6 +62,7 @@ const selectedSpecies = computed(
 
 const todayIso = () => new Date().toISOString().slice(0, 10)
 
+// Match the other page search inputs: postcode searches display postcode + suburb; suburb searches can display just the suburb.
 const shouldDisplayPostcode = (value) => /^\s*\d/.test(String(value || ''))
 
 const suburbLabel = (item, includePostcode = shouldDisplayPostcode(postcodeInput.value)) => {
@@ -59,11 +70,11 @@ const suburbLabel = (item, includePostcode = shouldDisplayPostcode(postcodeInput
   const name = String(item?.name || '').trim()
   if (!postcode) return name
   if (!name || name.toLowerCase() === postcode.toLowerCase()) return postcode
-  if (includePostcode) return item?.label || `${postcode} ${name}`
+  if (includePostcode) return `${postcode} ${name}`
   return name
 }
 
-const suggestionLabel = (item) => item?.label || suburbLabel(item, true)
+const suggestionLabel = (item) => suburbLabel(item, true)
 
 const displayLocation = computed(() => {
   const postcode = String(feedUser.value?.postcode || activePostcode.value || '').trim()
@@ -72,6 +83,7 @@ const displayLocation = computed(() => {
   return suburb ? `${suburb} ${postcode}` : `postcode ${postcode}`
 })
 
+// The UI week label is presentation-only; prediction scores are calculated by the API from species_cache dates.
 const weekRange = computed(() => {
   const start = new Date()
   const end = new Date()
@@ -80,6 +92,7 @@ const weekRange = computed(() => {
   return `${formatter.format(start)} - ${formatter.format(end)}`
 })
 
+// Convert API prey type strings into the compact card categories used by the Figma layout.
 const normalizeCategory = (preyType) => {
   const text = String(preyType || '').toLowerCase()
   if (text.includes('bird')) return 'Bird'
@@ -90,6 +103,7 @@ const normalizeCategory = (preyType) => {
   return 'Native Species'
 }
 
+// Visual risk badges are derived from database conservation status or API activity level.
 const riskMeta = (status, index = 0) => {
   const text = String(status || '').toLowerCase()
   if (text.includes('critical') || text.includes('endangered')) return { label: 'High', className: 'risk-high' }
@@ -134,6 +148,7 @@ const formatKm = (value) => {
   return Number.isFinite(n) ? `${n.toFixed(1)} km` : 'Database pending'
 }
 
+// Wikipedia image helpers are intentionally isolated from all numeric analysis logic.
 const toWikiTitle = (value) => String(value || '').trim().replace(/\s+/g, '_')
 
 const fetchSpeciesImage = async (card) => {
@@ -167,6 +182,7 @@ const loadPredictionImages = async () => {
   }
 }
 
+// Prediction cards use API rows when available. The fallback only reshapes already-loaded sighting rows, never hard-coded demo data.
 const predictionCards = computed(() => {
   if (predictionItems.value.length) {
     return predictionItems.value.map((item) => {
@@ -203,6 +219,7 @@ const predictionCards = computed(() => {
   return cards
 })
 
+// Hotspot rows are API-derived from species_cache grid buckets; the fallback groups the current database feed if no hotspot rows are returned.
 const hotspotRows = computed(() => {
   if (hotspotItems.value.length) {
     return hotspotItems.value.map((row) => ({
@@ -256,6 +273,7 @@ const hotspotRows = computed(() => {
     .slice(0, 4)
 })
 
+// Plot database hotspot coordinates into a simple Figma-style map without introducing any new numeric source.
 const hotspotDots = computed(() => {
   const geoRows = hotspotRows.value.filter((row) => Number.isFinite(row.lat) && Number.isFinite(row.lng))
   if (geoRows.length) {
@@ -294,6 +312,7 @@ const hotspotDots = computed(() => {
   }))
 })
 
+// Suburb autocomplete uses the same /api/wildlife-intelligence?action=suburbs endpoint pattern as the other search pages.
 const fetchSuburbs = async (query, limit = 12) => {
   const response = await fetch(`/api/wildlife-intelligence?action=suburbs&q=${encodeURIComponent(query)}&limit=${limit}`)
   const data = await response.json()
@@ -323,6 +342,7 @@ const chooseSuburb = (item) => {
   suburbSuggestions.value = []
 }
 
+// Resolve typed text into a Victorian postcode before any feed/prediction/hotspot query is allowed.
 const resolvePostcode = async () => {
   const q = postcodeInput.value.trim()
   if (
@@ -345,6 +365,7 @@ const resolvePostcode = async () => {
   return match.postcode
 }
 
+// Load all numeric page sections in one API call: predictions, hotspots, and the neighbour alert feed.
 const loadFeed = async (postcode = activePostcode.value) => {
   loading.value = true
   feedError.value = ''
@@ -370,6 +391,7 @@ const loadFeed = async (postcode = activePostcode.value) => {
   }
 }
 
+// Analyze button handler; keeps results hidden until this succeeds, matching the Risk Map search behavior.
 const submitLocation = async () => {
   feedError.value = ''
   reportSuccess.value = ''
@@ -382,6 +404,7 @@ const submitLocation = async () => {
   }
 }
 
+// Species options are loaded from species_cache for the retained self-report API flow.
 const loadSpeciesOptions = async () => {
   speciesLoading.value = true
   try {
@@ -433,6 +456,7 @@ const openReport = () => {
   requestAnimationFrame(() => document.querySelector('.report-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
+// Report submission writes into species_sightings so a self-reported row can return through the same feed query.
 const resolveReportLocation = async () => {
   const q = reportLocationInput.value.trim()
   if (selectedReportLocation.value?.postcode && q === suburbLabel(selectedReportLocation.value, true)) {
@@ -510,6 +534,7 @@ watch(postcodeInput, () => {
   suburbTimer = setTimeout(loadSuburbSuggestions, 180)
 })
 
+// Debounced report helpers are separate from the Analyze search and only touch database-backed species/suburb option endpoints.
 watch(speciesSearch, () => {
   if (speciesTimer) clearTimeout(speciesTimer)
   speciesTimer = setTimeout(loadSpeciesOptions, 180)
@@ -532,6 +557,7 @@ watch(predictionCards, () => {
   loadPredictionImages()
 })
 
+// Mount only hydrates auth context and optional visual image cache; it does not fetch numeric intelligence until Analyze is clicked.
 onMounted(async () => {
   user.value = getCurrentUser()
   activePostcode.value = String(user.value?.postcode || '').trim()
@@ -542,8 +568,12 @@ onMounted(async () => {
 
 <template>
   <main class="wildlife-page">
+    <!-- Header: static feature title; no location-specific data is shown before the user analyzes a search. -->
     <section class="intelligence-header">
       <div class="header-title">
+        <span class="header-icon">
+          <LineIcon name="brain" />
+        </span>
         <div>
           <h1>Community Wildlife Intelligence</h1>
           <p>Data-driven wildlife awareness powered by biodiversity insights</p>
@@ -552,9 +582,12 @@ onMounted(async () => {
     </section>
 
     <div class="wildlife-wrap">
+      <!-- Search: manual postcode/suburb entry, matching Risk Map behavior with no default auto-filled query. -->
       <section class="search-card">
         <div class="search-copy">
-          <span class="pin-icon">O</span>
+          <span class="pin-icon">
+            <LineIcon name="map-pin" />
+          </span>
           <div>
             <h2>Enter Your Victorian Postcode or Suburb</h2>
             <p>Discover which threatened species are most likely to be active in your area this week</p>
@@ -588,19 +621,24 @@ onMounted(async () => {
         <p v-if="reportSuccess" class="success-line">{{ reportSuccess }}</p>
       </section>
 
-      <template v-if="hasAnalyzed">
-        <section class="data-note">
-          <span>&#8599;</span>
-          <div>
-            <h3>Analysis Based On Historical Data</h3>
-            <p>
-              Predictions use species_cache biodiversity records, species_sightings community reports,
-              seasonal observation patterns, and reserve proximity within the searched 5km area.
-              Updated from the live database.
-            </p>
-          </div>
-        </section>
+      <!-- Data note: always visible, generic provenance text with no hard-coded postcode/suburb. -->
+      <section class="data-note">
+        <span>
+          <LineIcon name="trend" />
+        </span>
+        <div>
+          <h3>Analysis Based On Historical Data</h3>
+          <p>
+            Predictions use species_cache biodiversity records, species_sightings community reports,
+            seasonal observation patterns, and reserve proximity within the searched 5km area.
+            Updated from the live database.
+          </p>
+        </div>
+      </section>
 
+      <!-- Analysis results: hidden until /api/wildlife-intelligence returns a payload for the searched postcode. -->
+      <template v-if="hasAnalyzed">
+        <!-- Tabs switch between the two database-derived summary views. -->
         <div class="tab-switch" role="tablist" aria-label="Wildlife intelligence sections">
           <button
             type="button"
@@ -618,6 +656,7 @@ onMounted(async () => {
           </button>
         </div>
 
+        <!-- Predictions: species_cache records scored by count, seasonality, and distance in the API. -->
         <section v-if="activeTab === 'predictions'" class="content-panel prediction-panel">
           <div class="panel-head">
             <h2>Predicted Threatened Species Activity</h2>
@@ -632,6 +671,7 @@ onMounted(async () => {
           <div v-if="predictionCards.length" class="prediction-grid">
             <article v-for="card in predictionCards" :key="card.id" class="prediction-card">
               <div class="species-photo" :class="card.imageClass">
+                <!-- Visual-only Wikipedia image; the card's numeric/status text still comes from the database API. -->
                 <img
                   v-if="cardImageUrls[card.id]"
                   :src="cardImageUrls[card.id]"
@@ -667,6 +707,7 @@ onMounted(async () => {
           </article>
         </section>
 
+        <!-- Hotspots: API grid buckets from nearby species_cache observations, rendered as a simple Figma-style map. -->
         <section v-else class="content-panel hotspot-panel">
           <div class="panel-head">
             <h2>Wildlife Activity Hotspots</h2>
@@ -705,6 +746,7 @@ onMounted(async () => {
           </div>
         </section>
 
+        <!-- Neighbour feed: combined species_sightings and recent species_cache records within the API's 5km/30-day filters. -->
         <section class="alert-feed">
           <div class="panel-head">
             <h2>Neighbour Wildlife Alert Feed</h2>
@@ -738,13 +780,20 @@ onMounted(async () => {
               <time>{{ daysAgo(sighting.createdAt) }}</time>
             </article>
           </div>
+
+          <article v-else class="empty-feed">
+            <h3>No nearby wildlife alerts yet</h3>
+            <p>No verified or self-reported sightings were found within the searched 5km area in the past 30 days.</p>
+          </article>
         </section>
+
       </template>
     </div>
   </main>
 </template>
 
 <style scoped>
+/* Page shell: green/blue Catwatcher background shared with the new Hunter Profile page. */
 .wildlife-page {
   min-height: calc(100dvh - 101px);
   background:
@@ -754,6 +803,7 @@ onMounted(async () => {
   color: #0b0f19;
 }
 
+/* Header: desktop-first feature identity area with the line-icon brain mark. */
 .intelligence-header {
   min-height: 170px;
   display: flex;
@@ -767,7 +817,23 @@ onMounted(async () => {
 }
 
 .header-title {
-  display: block;
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 24px;
+  align-items: center;
+}
+
+.header-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  color: #08a84e;
+}
+
+.header-icon :deep(.line-icon) {
+  width: 48px;
+  height: 48px;
 }
 
 .header-title h1 {
@@ -819,6 +885,7 @@ onMounted(async () => {
   padding: 60px 16px 78px;
 }
 
+/* Cards: shared white panels for search, result sections, alert feed, and the retained report form styles. */
 .search-card,
 .content-panel,
 .alert-feed,
@@ -830,6 +897,7 @@ onMounted(async () => {
   padding: 46px;
 }
 
+/* Search form: manual postcode/suburb lookup before any numeric database result is shown. */
 .search-copy {
   display: grid;
   grid-template-columns: 40px 1fr;
@@ -842,10 +910,13 @@ onMounted(async () => {
   height: 34px;
   display: grid;
   place-items: center;
-  border: 4px solid #0b0f19;
-  border-radius: 999px;
-  font-size: 1rem;
-  font-weight: 950;
+  color: #0b0f19;
+}
+
+.pin-icon :deep(.line-icon),
+.data-note span :deep(.line-icon) {
+  width: 34px;
+  height: 34px;
 }
 
 .search-copy h2,
@@ -1024,6 +1095,7 @@ onMounted(async () => {
   font-size: clamp(0.98rem, 1.3vw, 1.25rem);
 }
 
+/* Result navigation: hidden before Analyze, then switches between DB prediction and hotspot summaries. */
 .tab-switch {
   width: min(100%, 860px);
   min-height: 74px;
@@ -1064,6 +1136,7 @@ onMounted(async () => {
   gap: 46px;
 }
 
+/* Prediction cards: species text and numeric fields come from the API; image blocks are visual enhancement only. */
 .prediction-card {
   overflow: hidden;
   border: 1px solid #dfe3e8;

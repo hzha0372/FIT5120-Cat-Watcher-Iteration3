@@ -1,4 +1,11 @@
 <script setup>
+/*
+  Line Icon Component
+  - Provides the small stroke icons used by the new Hunter Profile and Wildlife Intelligence pages.
+  - Keeps these page-specific icons in one component so templates can stay readable and visual updates remain consistent.
+  - Icons are presentational only: they do not carry data values and are hidden from screen readers with aria-hidden.
+*/
+
 defineProps({
   name: {
     type: String,
@@ -59,6 +66,21 @@ defineProps({
     <template v-else-if="name === 'trend'">
       <path d="M3 17 9 11l4 4 7-7" />
       <path d="M14 8h6v6" />
+    </template>
+
+    <template v-else-if="name === 'lightbulb'">
+      <path d="M9 18h6" />
+      <path d="M10 22h4" />
+      <path d="M8.5 14.5A6 6 0 1 1 15.5 14c-.9.7-1.5 1.8-1.5 3h-4c0-1.1-.5-2-1.5-2.5Z" />
+    </template>
+
+    <template v-else-if="name === 'rotate-ccw'">
+      <path d="M4 4v6h6" />
+      <path d="M4.6 10A8 8 0 1 0 7 5.2" />
+    </template>
+
+    <template v-else-if="name === 'chevron-right'">
+      <path d="m9 18 6-6-6-6" />
     </template>
   </svg>
 </template>

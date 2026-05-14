@@ -5,8 +5,11 @@ import { Pool } from 'pg'
 // Vercel entry: /api/wildlife-intelligence, with action=feed, action=report, action=species-options, or action=suburbs.
 /*
   Module Notes
-  - Uses species_sightings for CatWatcher community reports and species_cache for FFG status enrichment.
-  - Measures distance with PostGIS geography from the searched Victorian postcode centroid.
+  - Uses species_sightings for CatWatcher community reports and species_cache for FFG-listed biodiversity records.
+  - Uses suburb_demographics to resolve the searched Victorian postcode centroid before any 5km calculation runs.
+  - Uses reserves boundary geometry to calculate nearest-reserve distances with PostGIS geography.
+  - Returns every numeric value rendered by WildlifeIntelligenceView.vue: distanceMetres, nearestReserveKm, predationPct, likelihoodScore, recordCount, distanceKm, radiusMetres, and daysBack.
+  - Does not use hard-coded demo rows for displayed counts, percentages, dates, or distances; the frontend only reshapes these database/API values.
   - Keeps self-reported sightings visually distinct through source labels returned to the Vue page.
 */
 /* eslint-env node */
@@ -22,6 +25,7 @@ const DEFAULT_DB_CONFIG = {
 
 let pool = null
 
+// Shared sanitizers. PostgreSQL numeric columns are strings in node-postgres, so response values are normalized before JSON output.
 const cleanText = (value) => String(value || '').trim()
 
 const toInt = (value, fallback = 0) => {
@@ -40,6 +44,7 @@ const isoOrNull = (value) => {
   return Number.isNaN(d.getTime()) ? null : d.toISOString()
 }
 
+// Reuse one PostgreSQL pool and support both local defaults and deployment DATABASE_URL/PG* environment variables.
 const getPool = () => {
   if (pool) return pool
 
@@ -69,6 +74,7 @@ const getPool = () => {
   return pool
 }
 
+// Read request JSON safely in both local Vite middleware and serverless runtimes.
 const readJsonBody = async (req) => {
   if (req.body && typeof req.body === 'object') return req.body
   if (typeof req.body === 'string') return JSON.parse(req.body || '{}')
@@ -82,6 +88,7 @@ const readJsonBody = async (req) => {
   return text ? JSON.parse(text) : {}
 }
 
+// species_cache does not expose a taxon_type column, so prey category is inferred consistently from common/scientific names.
 const inferPreyType = (commonName = '', scientificName = '') => {
   const text = `${commonName} ${scientificName}`.toLowerCase()
   if (/(bird|duck|parrot|cockatoo|lorikeet|rosella|owl|eagle|hawk|falcon|goshawk|wren|finch|honeyeater|swallow|teal|dove|pigeon|raven|magpie|wagtail|warbler|gull|swan|coot|snipe|quail|rail|heron|ibis|egret|bittern|tern|sandpiper|greenshank|goose|aves|passer|platycercus|trichoglossus|gymnorhina|rostratula)/.test(text)) {
@@ -98,6 +105,7 @@ const inferPreyType = (commonName = '', scientificName = '') => {
   return 'Native Species'
 }
 
+// Normalize source labels so the feed can distinguish self-reported rows from database/photo-verified rows.
 const normalizeSource = (source) => {
   const text = cleanText(source).toLowerCase()
   if (text === 'self-reported') return 'Self-reported'
@@ -109,6 +117,7 @@ const normalizeSource = (source) => {
 
 const isSelfReported = (source) => normalizeSource(source) === 'Self-reported'
 
+// Resolve an existing CatWatcher user when userId is provided; postcode-only lookup supports direct searches.
 const getUser = async (db, { userId, postcode }) => {
   const result = await db.query(
     `SELECT id,
@@ -125,6 +134,7 @@ const getUser = async (db, { userId, postcode }) => {
   return result.rows?.[0] || null
 }
 
+// Look up the searched postcode centroid from suburb_demographics; every distance query depends on these coordinates.
 const getPostcodeLocation = async (db, postcode) => {
   const result = await db.query(
     `SELECT TRIM(postcode) AS postcode,
@@ -143,6 +153,7 @@ const getPostcodeLocation = async (db, postcode) => {
   return result.rows?.[0] || null
 }
 
+// Resolve a report location from either postcode or suburb name, still using suburb_demographics as the source of truth.
 const getSuburbLocation = async (db, { postcode, suburbName }) => {
   if (/^\d{4}$/.test(cleanText(postcode))) {
     return getPostcodeLocation(db, cleanText(postcode))
@@ -168,6 +179,7 @@ const getSuburbLocation = async (db, { postcode, suburbName }) => {
   return result.rows?.[0] || null
 }
 
+// Enrich a reported species with its threatened status from species_cache before saving or displaying it.
 const getThreatenedSpeciesMatch = async (db, { scientificName, commonName }) => {
   const result = await db.query(
     `SELECT
@@ -197,6 +209,7 @@ const getThreatenedSpeciesMatch = async (db, { scientificName, commonName }) => 
   return result.rows?.[0] || null
 }
 
+// Ensure the community sighting table exists for local/dev deployments; production DB already uses this schema.
 const ensureSightingTable = async (db) => {
   await db.query(`
     CREATE TABLE IF NOT EXISTS species_sightings (
@@ -222,6 +235,7 @@ const ensureSightingTable = async (db) => {
   `)
 }
 
+// Shape feed rows from SQL into the exact fields rendered by the neighbour alert feed.
 const normalizeFeedRow = (row) => {
   const commonName = cleanText(row.common_name)
   const scientificName = cleanText(row.scientific_name)
@@ -248,6 +262,7 @@ const normalizeFeedRow = (row) => {
   }
 }
 
+// Shape prediction rows and preserve the API likelihood score even if the current card UI only displays High/Medium/Low.
 const normalizePredictionRow = (row) => {
   const commonName = cleanText(row.common_name)
   const scientificName = cleanText(row.scientific_name)
@@ -268,6 +283,7 @@ const normalizePredictionRow = (row) => {
   }
 }
 
+// Shape hotspot buckets; recordCount and distanceKm are direct SQL outputs from the species_cache grid query.
 const normalizeHotspotRow = (row) => ({
   hotspotId: cleanText(row.hotspot_id),
   severityLevel: cleanText(row.severity_level) || 'Low',
@@ -278,6 +294,7 @@ const normalizeHotspotRow = (row) => ({
   lng: toNum(row.hotspot_lng, null),
 })
 
+// Main feed endpoint: resolves the searched location and loads all numeric page sections from database queries.
 const wildlifeFeedHandler = async (req, res) => {
   try {
     const db = getPool()
@@ -305,6 +322,7 @@ const wildlifeFeedHandler = async (req, res) => {
     }
 
     // Feed includes CatWatcher species_sightings plus recent species_cache records as database-verified local context.
+    // PostGIS ST_DWithin enforces the 5km radius and ST_Distance returns the displayed metres-from-home value.
     const result = await db.query(
       `WITH home AS (
          SELECT
@@ -440,6 +458,7 @@ const wildlifeFeedHandler = async (req, res) => {
       [homeLng, homeLat],
     )
 
+    // Predictions are scored only from nearby species_cache records: volume, seasonal week match, and distance from the searched centroid.
     const predictionsResult = await db.query(
       `WITH home AS (
          SELECT ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS geom
@@ -537,6 +556,7 @@ const wildlifeFeedHandler = async (req, res) => {
       [homeLng, homeLat],
     )
 
+    // Hotspots bucket nearby species_cache coordinates into small grid cells; counts/severity/distance are all SQL-derived.
     const hotspotsResult = await db.query(
       `WITH home AS (
          SELECT
@@ -630,6 +650,7 @@ const wildlifeFeedHandler = async (req, res) => {
   }
 }
 
+// Species picker data for the retained self-report API flow, sourced only from threatened species_cache rows.
 const wildlifeSpeciesOptionsHandler = async (req, res) => {
   try {
     const q = cleanText(req.query?.q)
@@ -686,6 +707,7 @@ const wildlifeSpeciesOptionsHandler = async (req, res) => {
   }
 }
 
+// Suburb autocomplete follows the same Victorian suburb_demographics lookup pattern used by Risk Map and Photo Identifier.
 const wildlifeSuburbsHandler = async (req, res) => {
   try {
     const q = cleanText(req.query?.q)
@@ -758,6 +780,7 @@ const wildlifeSuburbsHandler = async (req, res) => {
   }
 }
 
+// Save a self-reported sighting into species_sightings after validating the species and searched Victorian location against the DB.
 const wildlifeReportHandler = async (req, res) => {
   try {
     if ((req.method || 'POST').toUpperCase() !== 'POST') {
@@ -873,6 +896,7 @@ const wildlifeReportHandler = async (req, res) => {
   }
 }
 
+// Router for Vercel/Vite middleware action values.
 export default async function wildlifeIntelligenceHandler(req, res) {
   const action = String(req.query?.action || req.featureAction || 'feed')
   if (action === 'species-options') return wildlifeSpeciesOptionsHandler(req, res)

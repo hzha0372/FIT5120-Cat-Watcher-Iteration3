@@ -6,18 +6,23 @@ import { getCurrentUser } from '../utils/auth'
 
 /*
   Hunter Profile View Responsibilities
-  - Renders the Figma-designed Hunter Profile landing, quiz, and result states.
-  - Sends the five behaviour answers to /api/hunter-profile so scoring and species lookup stay database-backed.
-  - Persists the latest result per logged-in user so returning users do not need to retake the quiz.
-  - Explains the Cat Tracker SA encounter formula beside the database-backed threatened species result.
+  - Renders the Figma-designed Hunter Profile landing, five-question quiz, and result states.
+  - Keeps the quiz wording and intro cards in the frontend because they are product copy, not measured data.
+  - Sends the five behaviour answers to /api/hunter-profile; the server recalculates score/profile type instead of trusting a frontend result.
+  - Displays numeric result data only from the API payload: profile score, roaming hours, prey rate, adjusted encounter estimate, and local species record rows.
+  - Shows species names/statuses returned from species_cache for the logged-in user's postcode, with localStorage used only as a "latest result" cache.
+  - Explains the Cat Tracker SA formula beside the database-backed threatened species result so the displayed number can be traced.
 */
 
 const user = ref(getCurrentUser())
+
+// Page state: intro is the landing view, quiz collects the five answers, result renders the latest API-backed profile.
 const viewMode = ref('intro')
 const loading = ref(false)
 const error = ref('')
 const result = ref(null)
 
+// These five answer keys match the accepted API contract in api/hunter-profile.js.
 const answers = ref({
   timing: '',
   stalking: '',
@@ -26,6 +31,7 @@ const answers = ref({
   habitat: '',
 })
 
+// Static quiz copy. Scoring is intentionally duplicated on the server, so these labels only drive the UI.
 const questions = [
   {
     key: 'timing',
@@ -84,6 +90,7 @@ const questions = [
   },
 ]
 
+// Intro cards explain the four possible server profile types before the user starts the assessment.
 const profileTypes = [
   {
     label: 'Low-Risk Homebody',
@@ -111,6 +118,7 @@ const profileTypes = [
   },
 ]
 
+// Landing-page discovery items are explanatory copy; the actual numeric values appear only after /api/hunter-profile returns.
 const discoverItems = [
   {
     label: 'Hunter Profile Type',
@@ -138,6 +146,7 @@ const discoverItems = [
   },
 ]
 
+// The API returns the recommended action title/citation; these fallback details fill out the visual card if older cached payloads omit optional text.
 const actionFallbacks = {
   activeStalker: {
     title: 'Use a Brightly Colored Collar with Bell',
@@ -166,16 +175,23 @@ const actionFallbacks = {
 }
 
 const storageKey = computed(() => `catwatch_hunter_profile_result_v1_${user.value?.id || 'guest'}`)
+
+// Quiz completeness drives button validation before a POST request is sent.
 const answeredCount = computed(() => Object.values(answers.value).filter(Boolean).length)
 const allAnswered = computed(() => answeredCount.value === questions.length)
+
+// User/cat display names come from the auth cache or the API response loaded from the users table.
 const catName = computed(() => result.value?.user?.catName || user.value?.catName || 'Your cat')
 const currentProfile = computed(() => result.value?.profile || {})
 const currentEstimate = computed(() => result.value?.estimate || {})
+
+// Profile descriptions are returned as an array by the API so each sentence can keep the Figma result spacing.
 const profileDescriptions = computed(() => {
   const lines = currentProfile.value.description
   return Array.isArray(lines) ? lines : [lines].filter(Boolean)
 })
 
+// Numeric encounter fields are rendered from the API payload. The server reads prey_per_day from cats_behaviour_stats.
 const preyRate = computed(() => Number(currentEstimate.value.preyRatePerDay || 0.0667))
 const roamingHours = computed(() => Number(currentProfile.value.roamingHours || 0))
 const adjustedRate = computed(() => preyRate.value * (roamingHours.value / 24))
@@ -185,6 +201,7 @@ const monthlyEncounters = computed(() => {
   return (adjustedRate.value * 30).toFixed(1)
 })
 
+// The methodology box mirrors the acceptance-criteria formula using the same API-backed values shown in the headline number.
 const methodologyLines = computed(() => [
   `Base prey rate: ${preyRate.value.toFixed(4)} encounters/day`,
   `Your cat's roaming time: ${roamingHours.value} hours/day`,
@@ -192,6 +209,7 @@ const methodologyLines = computed(() => [
   'Monthly projection: adjusted rate x 30 days',
 ])
 
+// Action evidence comes from the API citation; the percent is parsed only for the progress meter visual.
 const actionDetails = computed(() => {
   const key = currentProfile.value.key || 'opportunistic'
   const fallback = actionFallbacks[key] || actionFallbacks.opportunistic
@@ -206,6 +224,7 @@ const actionDetails = computed(() => {
   }
 })
 
+// Result tone and icon are derived from the server profile key so visual styling stays coupled to the calculated type.
 const profileClass = computed(() => {
   const key = currentProfile.value.key || ''
   if (key === 'ambushPredator') return 'result-ambush'
@@ -222,6 +241,7 @@ const profileMark = computed(() => {
   return 'paw'
 })
 
+// Location is read from the API's users/suburb_demographics lookup and is shown only after a result exists.
 const locationLine = computed(() => {
   if (!result.value?.user) return ''
   const postcode = result.value.user.postcode || ''
@@ -229,6 +249,7 @@ const locationLine = computed(() => {
   return suburb ? `${postcode} ${suburb}` : postcode
 })
 
+// Risk chips are visual labels layered on top of the database conservation status; they do not replace the source status text.
 const riskMeta = (species, index = 0) => {
   const text = String(species?.conservationStatus || '').toLowerCase()
   const highProfile = ['activeStalker', 'ambushPredator'].includes(currentProfile.value.key)
@@ -239,12 +260,14 @@ const riskMeta = (species, index = 0) => {
   return { label: 'Low Risk', className: 'risk-low' }
 }
 
+// Start the quiz from either landing CTA without mutating any saved profile.
 const startQuiz = () => {
   error.value = ''
   viewMode.value = 'quiz'
   requestAnimationFrame(() => document.querySelector('.quiz-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
 }
 
+// Reopen the cached/latest profile when the user navigates back from the quiz.
 const showResult = () => {
   if (result.value) {
     viewMode.value = 'result'
@@ -252,6 +275,7 @@ const showResult = () => {
   }
 }
 
+// Retake clears the local cache and answer state; the next result will come from a fresh API request.
 const resetQuiz = () => {
   answers.value = {
     timing: '',
@@ -266,6 +290,7 @@ const resetQuiz = () => {
   viewMode.value = 'quiz'
 }
 
+// Build Cat's Profile posts only raw answers/user context; all scoring, species lookup, and numeric calculation happen in the API.
 const buildProfile = async () => {
   error.value = ''
   if (!allAnswered.value) {
@@ -297,6 +322,7 @@ const buildProfile = async () => {
   }
 }
 
+// Restore the latest API payload for the current user so returning to /hunter-profile does not require a retake.
 onMounted(() => {
   user.value = getCurrentUser()
   try {
@@ -314,6 +340,7 @@ onMounted(() => {
 <template>
   <main class="hunter-page">
     <div class="hunter-wrap">
+      <!-- Hero: green Catwatcher entry panel; text is static page copy and the CTA only changes view state. -->
       <section class="hunter-hero">
         <p class="page-kicker">Cat's Hunter Profile</p>
         <h1>Understand Your Cat's Hunting Behavior</h1>
@@ -330,6 +357,7 @@ onMounted(() => {
       </section>
 
       <template v-if="viewMode === 'intro'">
+        <!-- Discovery overview: explains which database-backed result sections will appear after a completed quiz. -->
         <section class="info-card discover-card">
           <div class="section-copy">
             <h2>What You'll Discover</h2>
@@ -348,6 +376,7 @@ onMounted(() => {
           </div>
         </section>
 
+        <!-- Profile type summary: mirrors the four server-side classification buckets from api/hunter-profile.js. -->
         <section class="info-card profile-types-card">
           <div class="section-copy">
             <h2>Four Hunter Profile Types</h2>
@@ -374,6 +403,7 @@ onMounted(() => {
         </div>
       </template>
 
+      <!-- Quiz form: collects the five raw answers but does not calculate the final score in the browser. -->
       <section v-if="viewMode === 'quiz'" class="info-card quiz-panel">
         <div class="quiz-head">
           <div>
@@ -415,11 +445,14 @@ onMounted(() => {
           </button>
           <button type="button" class="primary-action" :disabled="loading" @click="buildProfile">
             {{ loading ? 'Building...' : "Build Cat's Profile" }}
+            <LineIcon v-if="!loading" name="chevron-right" />
           </button>
         </div>
       </section>
 
+      <!-- Result state: renders the latest /api/hunter-profile payload, either freshly posted or restored from localStorage. -->
       <section v-if="viewMode === 'result' && result" class="result-panel">
+        <!-- Profile banner: score, type, and location all come from the API response. -->
         <article class="profile-banner" :class="profileClass">
           <span class="result-icon">
             <LineIcon :name="profileMark" />
@@ -433,6 +466,7 @@ onMounted(() => {
         </article>
 
         <div class="result-grid">
+          <!-- Local threatened species: species_cache rows for the user's postcode, filtered/ranked by the API. -->
           <section class="analysis-card species-risk-card">
             <div class="card-title">
               <span class="warning-icon">!</span>
@@ -465,6 +499,7 @@ onMounted(() => {
             </div>
           </section>
 
+          <!-- Encounter estimate: uses the API prey rate and roaming-hours output with the AC9.1 formula. -->
           <section class="analysis-card encounter-card">
             <div class="card-title">
               <span class="trend-icon">&#8599;</span>
@@ -490,9 +525,12 @@ onMounted(() => {
           </section>
         </div>
 
+        <!-- Recommended first action: API title/citation plus frontend presentation of the evidence meter. -->
         <section class="recommended-card" :style="{ '--effectiveness': `${actionDetails.effectiveness}%` }">
           <div class="recommended-head">
-            <span class="light-icon">?</span>
+            <span class="light-icon">
+              <LineIcon name="lightbulb" />
+            </span>
             <div>
               <h2>Recommended First Action</h2>
               <p>Evidence-based intervention tailored to {{ result.profile.type }} behavior pattern</p>
@@ -531,6 +569,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* Page shell: green/teal background shared with the newer Catwatcher feature pages. */
 .hunter-page {
   min-height: calc(100dvh - 101px);
   background:
@@ -546,6 +585,7 @@ onMounted(() => {
   margin: 0 auto;
 }
 
+/* Hero: full-width Figma-style launch panel with the updated green gradient. */
 .hunter-hero {
   min-height: 520px;
   border-radius: 14px;
@@ -591,6 +631,7 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+/* Shared buttons: keeps CTAs visually consistent across intro, quiz, and result states. */
 .hero-primary,
 .hero-secondary,
 .primary-action,
@@ -635,6 +676,7 @@ onMounted(() => {
   border-color: rgba(255, 255, 255, 0.35);
 }
 
+/* Overview cards: "What You'll Discover" and "Four Hunter Profile Types" sections on the landing state. */
 .info-card,
 .analysis-card {
   margin-top: 34px;
@@ -775,6 +817,15 @@ onMounted(() => {
   font-weight: 950;
 }
 
+.discover-icon :deep(.line-icon),
+.type-icon :deep(.line-icon),
+.result-icon :deep(.line-icon),
+.light-icon :deep(.line-icon),
+.primary-action :deep(.line-icon) {
+  width: 1em;
+  height: 1em;
+}
+
 .discover-violet {
   color: #9717f0;
   background: #f1ddff;
@@ -826,6 +877,7 @@ onMounted(() => {
   font-weight: 900;
 }
 
+/* Quiz controls: browser state only; submitted values are revalidated and rescored by the API. */
 .question-stack {
   margin-top: 34px;
   display: grid;
@@ -882,7 +934,7 @@ onMounted(() => {
 
 .primary-action {
   color: #ffffff;
-  background: #030414;
+  background: #08ac4f;
 }
 
 .primary-action:disabled {
@@ -908,6 +960,7 @@ onMounted(() => {
   margin-top: 34px;
 }
 
+/* Result summary: profile color and icon are tied to the calculated server profile key. */
 .profile-banner {
   min-height: 210px;
   border: 3px solid transparent;
@@ -1000,6 +1053,7 @@ onMounted(() => {
   gap: 46px;
 }
 
+/* Analysis cards: local species and encounter math use fields returned by /api/hunter-profile. */
 .analysis-card {
   margin-top: 0;
   padding: 42px;
