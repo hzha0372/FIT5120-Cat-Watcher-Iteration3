@@ -8,6 +8,8 @@ import impactScoreHandler from './api/impact-score.js'
 import photoIdentifierHandler from './api/photo-identifier.js'
 import riskMapHandler from './api/risk-map.js'
 import scoreboardHandler from './api/scoreboard.js'
+import hunterProfileHandler from './api/hunter-profile.js'
+import wildlifeIntelligenceHandler from './api/wildlife-intelligence.js'
 
 const localApiRoutes = {
   'about-us': { handler: aboutUsHandler, action: 'stats' },
@@ -15,6 +17,8 @@ const localApiRoutes = {
   'photo-identifier': { handler: photoIdentifierHandler, action: 'identify' },
   'risk-map': { handler: riskMapHandler, action: 'data' },
   scoreboard: { handler: scoreboardHandler, action: 'data' },
+  'hunter-profile': { handler: hunterProfileHandler, action: 'profile' },
+  'wildlife-intelligence': { handler: wildlifeIntelligenceHandler, action: 'feed' },
 }
 
 const getLocalApiRouteName = (url) => url.pathname.replace(/^\/api\/?/, '').replace(/^\/+|\/+$/g, '')

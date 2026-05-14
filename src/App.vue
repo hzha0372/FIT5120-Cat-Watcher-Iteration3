@@ -44,6 +44,16 @@ const exploreItems = [
     match: (path) => path.startsWith('/photo-identifier') || path.startsWith('/sighting-reporter'),
   },
   {
+    label: 'Hunter Profile',
+    to: '/hunter-profile',
+    match: (path) => path.startsWith('/hunter-profile'),
+  },
+  {
+    label: 'Wildlife Intelligence',
+    to: '/wildlife-intelligence',
+    match: (path) => path.startsWith('/wildlife-intelligence'),
+  },
+  {
     label: 'About Us',
     to: '/about',
     match: (path) => path.startsWith('/about') || path.startsWith('/vision-mission'),

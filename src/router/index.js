@@ -5,6 +5,8 @@ import CatImpactScoreView from '../views/CatImpactScoreView.vue'
 import CatScoreboardView from '../views/CatScoreboardView.vue'
 import VisionMissionView from '../views/VisionMissionView.vue'
 import PhotoIdentifierView from '../views/PhotoIdentifierView.vue'
+import HunterProfileView from '../views/HunterProfileView.vue'
+import WildlifeIntelligenceView from '../views/WildlifeIntelligenceView.vue'
 import LoginView from '../views/LoginView.vue'
 import { isAuthenticated } from '../utils/auth'
 
@@ -44,6 +46,16 @@ const routes = [
     // Aliases keep old project URLs working while the visible navigation uses the current "Photo Identifier" label.
     alias: ['/sighting-reporter'],
     component: PhotoIdentifierView,
+  },
+  {
+    path: '/hunter-profile',
+    component: HunterProfileView,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/wildlife-intelligence',
+    component: WildlifeIntelligenceView,
+    meta: { requiresAuth: true },
   },
   {
     path: '/about',

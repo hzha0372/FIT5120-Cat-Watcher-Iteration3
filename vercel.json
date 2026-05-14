@@ -10,6 +10,8 @@
     { "source": "/login", "destination": "/index.html" },
     { "source": "/photo-identifier", "destination": "/index.html" },
     { "source": "/sighting-reporter", "destination": "/index.html" },
+    { "source": "/hunter-profile", "destination": "/index.html" },
+    { "source": "/wildlife-intelligence", "destination": "/index.html" },
     { "source": "/about", "destination": "/index.html" },
     { "source": "/vision-mission", "destination": "/index.html" }
   ]

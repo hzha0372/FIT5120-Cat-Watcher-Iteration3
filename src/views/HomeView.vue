@@ -65,6 +65,22 @@ const tools = [
     tone: 'cw-icon-emerald',
   },
   {
+    title: 'Hunter Profile',
+    description: "Answer five behaviour questions and reveal your cat's local wildlife risk profile",
+    to: '/hunter-profile',
+    icon: 'Quiz',
+    iconSrc: '',
+    tone: 'cw-icon-violet',
+  },
+  {
+    title: 'Wildlife Intelligence',
+    description: 'View nearby threatened species alerts and report sightings without a photo',
+    to: '/wildlife-intelligence',
+    icon: 'Feed',
+    iconSrc: '',
+    tone: 'cw-icon-pink',
+  },
+  {
     title: 'About Catwatcher',
     description: 'Learn about our vision to protect wildlife and promote responsible pet ownership',
     to: '/about',
