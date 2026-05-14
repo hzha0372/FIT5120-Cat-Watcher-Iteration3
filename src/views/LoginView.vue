@@ -27,22 +27,47 @@ const redirectTarget = computed(() =>
   typeof route.query.redirect === 'string' ? route.query.redirect : '/',
 )
 
-// Choose hero text based on the protected page that sent the user here.
-const heroTitle = computed(() => {
-  if (redirectTarget.value.startsWith('/impact-score')) return 'Welcome Back'
-  if (redirectTarget.value.startsWith('/cat-scoreboard') || redirectTarget.value.startsWith('/my-dashboard') || redirectTarget.value.startsWith('/dashboard')) {
-    return 'Welcome Back'
+// Protected-page login copy follows the redirect target so the access screen matches the page the user clicked.
+const protectedPageCopy = computed(() => {
+  const target = redirectTarget.value
+  if (target.startsWith('/impact-score')) {
+    return {
+      title: 'Sign in to view Impact Score',
+      subtitle: 'Continue your impact score',
+    }
   }
-  return 'Sign in to view Impact Score and Scoreboard'
+  if (
+    target.startsWith('/cat-scoreboard') ||
+    target.startsWith('/my-dashboard') ||
+    target.startsWith('/dashboard') ||
+    target.startsWith('/guardian/leaderboard')
+  ) {
+    return {
+      title: 'Sign in to view Scoreboard',
+      subtitle: 'Continue your scoreboard',
+    }
+  }
+  if (target.startsWith('/hunter-profile')) {
+    return {
+      title: 'Sign in to view Hunter Profile',
+      subtitle: "Continue to your cat's Hunter Profile",
+    }
+  }
+  if (target.startsWith('/wildlife-intelligence')) {
+    return {
+      title: 'Sign in to view Wildlife Intelligence',
+      subtitle: 'Continue to Community Wildlife Intelligence',
+    }
+  }
+
+  return {
+    title: 'Sign in to Catwatcher',
+    subtitle: 'Use your team account to access protected Catwatcher pages.',
+  }
 })
 
-const heroSubtitle = computed(() => {
-  if (redirectTarget.value.startsWith('/impact-score')) return 'Continue your impact score'
-  if (redirectTarget.value.startsWith('/cat-scoreboard') || redirectTarget.value.startsWith('/my-dashboard') || redirectTarget.value.startsWith('/dashboard')) {
-    return 'Continue your scoreboard'
-  }
-  return 'Use your team account to access protected analytics pages while keeping public pages open for visitors.'
-})
+const heroTitle = computed(() => protectedPageCopy.value.title)
+const heroSubtitle = computed(() => protectedPageCopy.value.subtitle)
 
 const switchMode = (nextMode) => {
   mode.value = nextMode

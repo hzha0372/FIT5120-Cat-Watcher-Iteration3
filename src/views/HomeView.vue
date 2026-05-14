@@ -153,7 +153,10 @@ const markIconFailed = (title) => {
             class="tool-card cw-card"
             :to="tool.to"
           >
-            <span class="cw-icon-tile" :class="tool.tone">
+            <span
+              class="cw-icon-tile"
+              :class="[tool.tone, { 'cw-icon-text': !tool.iconSrc || failedIcons[tool.title] }]"
+            >
               <img
                 v-if="tool.iconSrc && !failedIcons[tool.title]"
                 :src="tool.iconSrc"
@@ -328,6 +331,16 @@ const markIconFailed = (title) => {
   height: 34px;
   object-fit: contain;
   display: block;
+}
+
+/* Text fallback icons need a wider tile than SVG/image icons so labels like "Quiz" stay fully visible. */
+.cw-icon-text {
+  width: auto;
+  min-width: 64px;
+  padding: 0 10px;
+  white-space: nowrap;
+  font-size: 0.96rem;
+  line-height: 1;
 }
 
 .cta-section {
