@@ -248,6 +248,36 @@ const normalizeFeedRow = (row) => {
   }
 }
 
+const normalizePredictionRow = (row) => {
+  const commonName = cleanText(row.common_name)
+  const scientificName = cleanText(row.scientific_name)
+  const preyType = inferPreyType(commonName, scientificName)
+  const category = preyType === 'Small Mammal' ? 'Mammal' : preyType
+  const likelihoodScore = toNum(row.likelihood_score, 0)
+  const activityLevel = cleanText(row.activity_level) || 'Low'
+  return {
+    id: `${scientificName || commonName}`.toLowerCase(),
+    commonName,
+    scientificName,
+    conservationStatus: cleanText(row.conservation_status) || 'Not listed',
+    category,
+    nearestReserveName: cleanText(row.nearest_reserve_name),
+    nearestReserveKm: toNum(row.nearest_reserve_km, null),
+    likelihoodScore,
+    activityLevel,
+  }
+}
+
+const normalizeHotspotRow = (row) => ({
+  hotspotId: cleanText(row.hotspot_id),
+  severityLevel: cleanText(row.severity_level) || 'Low',
+  recordCount: toInt(row.record_count, 0),
+  dominantCategory: cleanText(row.dominant_category) || 'Native Species',
+  distanceKm: toNum(row.distance_km, null),
+  lat: toNum(row.hotspot_lat, null),
+  lng: toNum(row.hotspot_lng, null),
+})
+
 const wildlifeFeedHandler = async (req, res) => {
   try {
     const db = getPool()
@@ -410,6 +440,174 @@ const wildlifeFeedHandler = async (req, res) => {
       [homeLng, homeLat],
     )
 
+    const predictionsResult = await db.query(
+      `WITH home AS (
+         SELECT ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS geom
+       ),
+       records AS (
+         SELECT
+           TRIM(sc.vernacular_name) AS common_name,
+           TRIM(sc.scientific_name) AS scientific_name,
+           COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') AS conservation_status,
+           sc.cached_at,
+           sc.lat,
+           sc.lng,
+           EXTRACT(WEEK FROM sc.cached_at)::int AS week_no
+         FROM species_cache sc
+         CROSS JOIN home
+         WHERE sc.lat IS NOT NULL
+           AND sc.lng IS NOT NULL
+           AND sc.cached_at IS NOT NULL
+           AND COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') <> 'Not listed'
+           AND ST_DWithin(
+             ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326)::geography,
+             home.geom,
+             5000
+           )
+       ),
+       scored AS (
+         SELECT
+           common_name,
+           scientific_name,
+           conservation_status,
+           COUNT(*)::numeric AS total_count,
+           SUM(
+             CASE
+               WHEN ABS(week_no - EXTRACT(WEEK FROM CURRENT_DATE)::int) <= 2 THEN 1
+               ELSE 0
+             END
+           )::numeric AS seasonal_count,
+           MAX(cached_at) AS latest_seen_at,
+           AVG(
+             ST_Distance(
+               ST_SetSRID(ST_MakePoint(lng::float, lat::float), 4326)::geography,
+               home.geom
+             )
+           ) AS avg_distance_m
+         FROM records
+         CROSS JOIN home
+         GROUP BY common_name, scientific_name, conservation_status
+       ),
+       with_reserve AS (
+         SELECT
+           s.*,
+           nearest.reserve_name AS nearest_reserve_name,
+           nearest.nearest_reserve_km
+         FROM scored s
+         LEFT JOIN LATERAL (
+           SELECT
+             reserve_name,
+             ROUND((
+               ST_Distance(
+                 ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+                 boundary::geography
+               ) / 1000
+             )::numeric, 1) AS nearest_reserve_km
+           FROM reserves
+           WHERE boundary IS NOT NULL
+           ORDER BY boundary <-> ST_SetSRID(ST_MakePoint($1, $2), 4326)
+           LIMIT 1
+         ) nearest ON TRUE
+       ),
+       weighted AS (
+         SELECT
+           *,
+           (
+             LEAST(total_count / 12.0, 1.0) * 0.45
+             + LEAST(seasonal_count / NULLIF(total_count, 0), 1.0) * 0.35
+             + GREATEST(0.0, 1.0 - LEAST(COALESCE(avg_distance_m, 5000) / 5000.0, 1.0)) * 0.20
+           ) * 100.0 AS likelihood_score
+         FROM with_reserve
+       )
+       SELECT
+         common_name,
+         scientific_name,
+         conservation_status,
+         nearest_reserve_name,
+         nearest_reserve_km,
+         ROUND(likelihood_score::numeric, 1) AS likelihood_score,
+         CASE
+           WHEN likelihood_score >= 68 THEN 'High'
+           WHEN likelihood_score >= 40 THEN 'Medium'
+           ELSE 'Low'
+         END AS activity_level
+       FROM weighted
+       ORDER BY likelihood_score DESC, latest_seen_at DESC
+       LIMIT 6`,
+      [homeLng, homeLat],
+    )
+
+    const hotspotsResult = await db.query(
+      `WITH home AS (
+         SELECT
+           ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS geom,
+           ST_SetSRID(ST_MakePoint($1, $2), 4326) AS geom4326
+       ),
+       source AS (
+         SELECT
+           TRIM(sc.vernacular_name) AS common_name,
+           TRIM(sc.scientific_name) AS scientific_name,
+           COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') AS conservation_status,
+           ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326) AS geom
+         FROM species_cache sc
+         CROSS JOIN home
+         WHERE sc.lat IS NOT NULL
+           AND sc.lng IS NOT NULL
+           AND COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') <> 'Not listed'
+           AND ST_DWithin(
+             ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326)::geography,
+             home.geom,
+             5000
+           )
+       ),
+       gridded AS (
+         SELECT
+           ST_SnapToGrid(geom, 0.01, 0.01) AS grid_geom,
+           common_name,
+           scientific_name
+         FROM source
+       ),
+       bucketed AS (
+         SELECT
+           ST_AsText(grid_geom) AS hotspot_id,
+           ST_Y(ST_Centroid(grid_geom)) AS hotspot_lat,
+           ST_X(ST_Centroid(grid_geom)) AS hotspot_lng,
+           COUNT(*)::int AS record_count,
+           SUM(CASE WHEN (LOWER(common_name) ~ '(bird|duck|parrot|cockatoo|lorikeet|rosella|owl|eagle|hawk|falcon|goshawk|wren|finch|honeyeater|swallow|teal|dove|pigeon|raven|magpie|wagtail|warbler|gull|swan|coot|snipe|quail|rail|heron|ibis|egret|bittern|tern|sandpiper|greenshank|goose)') THEN 1 ELSE 0 END) AS bird_count,
+           SUM(CASE WHEN (LOWER(common_name) ~ '(lizard|skink|gecko|snake|python|turtle|dragon|reptile)') THEN 1 ELSE 0 END) AS reptile_count,
+           SUM(CASE WHEN (LOWER(common_name) ~ '(possum|bandicoot|dunnart|antechinus|rat|mouse|mammal|bat)') THEN 1 ELSE 0 END) AS mammal_count
+         FROM gridded
+         GROUP BY grid_geom
+         HAVING COUNT(*) >= 2
+       )
+       SELECT
+         hotspot_id,
+         hotspot_lat,
+         hotspot_lng,
+         record_count,
+         CASE
+           WHEN bird_count >= reptile_count AND bird_count >= mammal_count THEN 'Bird'
+           WHEN reptile_count >= mammal_count THEN 'Reptile'
+           ELSE 'Mammal'
+         END AS dominant_category,
+         CASE
+           WHEN record_count >= 8 THEN 'High'
+           WHEN record_count >= 4 THEN 'Medium'
+           ELSE 'Low'
+         END AS severity_level,
+         ROUND((
+           ST_Distance(
+             ST_SetSRID(ST_MakePoint(hotspot_lng, hotspot_lat), 4326)::geography,
+             home.geom
+           ) / 1000
+         )::numeric, 2) AS distance_km
+       FROM bucketed
+       CROSS JOIN home
+       ORDER BY record_count DESC, distance_km ASC
+       LIMIT 8`,
+      [homeLng, homeLat],
+    )
+
     res.status(200).json({
       user: {
         id: user?.id ? toInt(user.id) : null,
@@ -422,6 +620,8 @@ const wildlifeFeedHandler = async (req, res) => {
       },
       radiusMetres: 5000,
       daysBack: 30,
+      predictions: (predictionsResult.rows || []).map(normalizePredictionRow),
+      hotspots: (hotspotsResult.rows || []).map(normalizeHotspotRow),
       sightings: (result.rows || []).map(normalizeFeedRow),
       updatedAt: new Date().toISOString(),
     })

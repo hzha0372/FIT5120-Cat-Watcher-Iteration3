@@ -35,12 +35,15 @@ const reportLocationInput = ref('')
 const selectedReportLocation = ref(null)
 const reportSuggestions = ref([])
 const reportLocationLoading = ref(false)
+const cardImageUrls = ref({})
 
 let suburbTimer = null
 let speciesTimer = null
 let reportLocationTimer = null
 
 const sightings = computed(() => payload.value?.sightings || [])
+const predictionItems = computed(() => payload.value?.predictions || [])
+const hotspotItems = computed(() => payload.value?.hotspots || [])
 const feedUser = computed(() => payload.value?.user || user.value || {})
 const hasAnalyzed = computed(() => Boolean(payload.value?.user?.postcode))
 const selectedSpecies = computed(
@@ -131,7 +134,56 @@ const formatKm = (value) => {
   return Number.isFinite(n) ? `${n.toFixed(1)} km` : 'Database pending'
 }
 
+const toWikiTitle = (value) => String(value || '').trim().replace(/\s+/g, '_')
+
+const fetchSpeciesImage = async (card) => {
+  const titles = [toWikiTitle(card.scientificName), toWikiTitle(card.commonName)].filter(Boolean)
+  for (const title of titles) {
+    try {
+      const response = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`)
+      if (!response.ok) continue
+      const data = await response.json()
+      const imageUrl = data?.thumbnail?.source || data?.originalimage?.source || ''
+      if (imageUrl) return imageUrl
+    } catch {
+      // Ignore and try the next title.
+    }
+  }
+  return ''
+}
+
+const loadPredictionImages = async () => {
+  const cards = predictionCards.value || []
+  const updates = {}
+  await Promise.all(
+    cards.map(async (card) => {
+      const key = card.id
+      if (!key || cardImageUrls.value[key] !== undefined) return
+      updates[key] = await fetchSpeciesImage(card)
+    }),
+  )
+  if (Object.keys(updates).length) {
+    cardImageUrls.value = { ...cardImageUrls.value, ...updates }
+  }
+}
+
 const predictionCards = computed(() => {
+  if (predictionItems.value.length) {
+    return predictionItems.value.map((item) => {
+      const category = normalizeCategory(item.category)
+      const level = String(item.activityLevel || 'Low')
+      return {
+        ...item,
+        category,
+        risk: {
+          label: level,
+          className: level === 'High' ? 'risk-high' : level === 'Medium' ? 'risk-medium' : 'risk-low',
+        },
+        imageClass: `image-${category.toLowerCase().replace(/\s+/g, '-')}`,
+      }
+    })
+  }
+
   const seen = new Set()
   const cards = []
   for (const sighting of sightings.value) {
@@ -152,6 +204,23 @@ const predictionCards = computed(() => {
 })
 
 const hotspotRows = computed(() => {
+  if (hotspotItems.value.length) {
+    return hotspotItems.value.map((row) => ({
+      category: normalizeCategory(row.dominantCategory),
+      count: Number(row.recordCount || 0),
+      averageDistance: Number(row.distanceKm),
+      level: String(row.severityLevel || 'Low'),
+      lat: Number(row.lat),
+      lng: Number(row.lng),
+      risk:
+        row.severityLevel === 'High'
+          ? 'risk-high'
+          : row.severityLevel === 'Medium'
+            ? 'risk-medium'
+            : 'risk-low',
+    }))
+  }
+
   const groups = new Map()
   for (const sighting of sightings.value) {
     const category = normalizeCategory(sighting.preyType)
@@ -188,6 +257,31 @@ const hotspotRows = computed(() => {
 })
 
 const hotspotDots = computed(() => {
+  const geoRows = hotspotRows.value.filter((row) => Number.isFinite(row.lat) && Number.isFinite(row.lng))
+  if (geoRows.length) {
+    const baseLat = Number(feedUser.value?.lat)
+    const baseLng = Number(feedUser.value?.lng)
+    const allLats = Number.isFinite(baseLat) ? [baseLat, ...geoRows.map((row) => row.lat)] : geoRows.map((row) => row.lat)
+    const allLngs = Number.isFinite(baseLng) ? [baseLng, ...geoRows.map((row) => row.lng)] : geoRows.map((row) => row.lng)
+    const minLat = Math.min(...allLats)
+    const maxLat = Math.max(...allLats)
+    const minLng = Math.min(...allLngs)
+    const maxLng = Math.max(...allLngs)
+    const latSpan = Math.max(maxLat - minLat, 0.01)
+    const lngSpan = Math.max(maxLng - minLng, 0.01)
+
+    return geoRows.map((row) => {
+      const left = 10 + ((row.lng - minLng) / lngSpan) * 80
+      const top = 90 - ((row.lat - minLat) / latSpan) * 80
+      return {
+        ...row,
+        left: Number.isFinite(left) ? left : 50,
+        top: Number.isFinite(top) ? top : 50,
+        size: row.level === 'High' ? 140 : row.level === 'Medium' ? 108 : 78,
+      }
+    })
+  }
+
   const positions = [
     { left: 35, top: 44, size: 138 },
     { left: 67, top: 30, size: 142 },
@@ -434,10 +528,15 @@ watch(reportLocationInput, () => {
   reportLocationTimer = setTimeout(loadReportSuggestions, 180)
 })
 
+watch(predictionCards, () => {
+  loadPredictionImages()
+})
+
 onMounted(async () => {
   user.value = getCurrentUser()
   activePostcode.value = String(user.value?.postcode || '').trim()
   await loadSpeciesOptions()
+  await loadPredictionImages()
 })
 </script>
 
@@ -445,7 +544,6 @@ onMounted(async () => {
   <main class="wildlife-page">
     <section class="intelligence-header">
       <div class="header-title">
-        <span class="header-icon">B</span>
         <div>
           <h1>Community Wildlife Intelligence</h1>
           <p>Data-driven wildlife awareness powered by biodiversity insights</p>
@@ -532,18 +630,24 @@ onMounted(async () => {
           <p v-if="loading && !predictionCards.length" class="status-line">Loading wildlife intelligence...</p>
 
           <div v-if="predictionCards.length" class="prediction-grid">
-            <article v-for="(card, index) in predictionCards" :key="card.id" class="prediction-card">
+            <article v-for="card in predictionCards" :key="card.id" class="prediction-card">
               <div class="species-photo" :class="card.imageClass">
+                <img
+                  v-if="cardImageUrls[card.id]"
+                  :src="cardImageUrls[card.id]"
+                  :alt="card.commonName"
+                  class="species-image"
+                  loading="lazy"
+                />
                 <span>{{ card.category }}</span>
               </div>
               <div class="prediction-body">
                 <div class="prediction-title">
                   <div>
-                    <span class="category-mark">{{ card.category.slice(0, 1) }}</span>
                     <h3>{{ card.commonName }}</h3>
                   </div>
-                  <span class="risk-badge" :class="riskMeta(card.conservationStatus, index).className">
-                    {{ riskMeta(card.conservationStatus, index).label }}
+                  <span class="risk-badge" :class="card.risk.className">
+                    {{ card.risk.label }}
                   </span>
                 </div>
                 <p><strong>Status:</strong> {{ card.conservationStatus }}</p>
@@ -663,22 +767,7 @@ onMounted(async () => {
 }
 
 .header-title {
-  display: grid;
-  grid-template-columns: 64px 1fr;
-  gap: 22px;
-  align-items: center;
-}
-
-.header-icon {
-  width: 56px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  border: 5px solid #08a84e;
-  border-radius: 18px;
-  color: #08a84e;
-  font-size: 1.8rem;
-  font-weight: 950;
+  display: block;
 }
 
 .header-title h1 {
@@ -984,6 +1073,7 @@ onMounted(async () => {
 }
 
 .species-photo {
+  position: relative;
   height: 300px;
   display: flex;
   align-items: flex-start;
@@ -995,6 +1085,24 @@ onMounted(async () => {
   background:
     radial-gradient(circle at 26% 30%, rgba(255, 255, 255, 0.85), transparent 18%),
     linear-gradient(135deg, #d7fff0, #d9ecff);
+}
+
+.species-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  background: linear-gradient(135deg, #dff3ea, #dbeafe);
+}
+
+.species-photo span {
+  position: relative;
+  z-index: 1;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .image-bird {
@@ -1036,22 +1144,8 @@ onMounted(async () => {
 }
 
 .prediction-title > div {
-  display: grid;
-  grid-template-columns: 34px 1fr;
-  gap: 18px;
+  display: flex;
   align-items: center;
-}
-
-.category-mark {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  color: #047857;
-  border: 3px solid currentColor;
-  border-radius: 999px;
-  font-size: 0.95rem;
-  font-weight: 950;
 }
 
 .prediction-title h3 {

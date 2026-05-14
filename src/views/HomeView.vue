@@ -77,7 +77,7 @@ const tools = [
     description: 'View nearby threatened species alerts and report sightings without a photo',
     to: '/wildlife-intelligence',
     icon: 'Feed',
-    iconSrc: '',
+    iconSrc: '/images/wildlife-intelligence-icon.svg',
     tone: 'cw-icon-pink',
   },
   {
