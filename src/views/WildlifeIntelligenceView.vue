@@ -312,6 +312,165 @@ const hotspotDots = computed(() => {
   }))
 })
 
+// Data-science visualizations: every computed below is read-only and reuses the existing reactive sources, so the original predictions/hotspots/feed logic is untouched.
+const summaryStats = computed(() => {
+  const cards = predictionCards.value
+  const sightingsList = sightings.value
+  const hotspots = hotspotRows.value
+
+  const totalSpecies = cards.length
+  const highRiskCount = cards.filter((c) => c.risk?.label === 'High').length
+  const closestMetres = sightingsList.reduce((min, s) => {
+    const d = Number(s.distanceMetres)
+    if (!Number.isFinite(d)) return min
+    return min === null || d < min ? d : min
+  }, null)
+
+  return {
+    totalSpecies,
+    highRiskCount,
+    closestKm: closestMetres === null ? null : closestMetres / 1000,
+    hotspotCount: hotspots.length,
+  }
+})
+
+const likelihoodRanking = computed(() => {
+  const items = predictionItems.value
+  if (!items.length) return []
+  const max = Math.max(...items.map((i) => Number(i.likelihoodScore) || 0), 1)
+  return items
+    .slice()
+    .sort((a, b) => (Number(b.likelihoodScore) || 0) - (Number(a.likelihoodScore) || 0))
+    .slice(0, 6)
+    .map((item) => {
+      const score = Number(item.likelihoodScore) || 0
+      const level = String(item.activityLevel || 'Low')
+      return {
+        id: item.id || `${item.commonName}`,
+        name: item.commonName,
+        score,
+        pct: Math.max(3, (score / max) * 100),
+        level,
+        levelClass: level === 'High' ? 'risk-high' : level === 'Medium' ? 'risk-medium' : 'risk-low',
+      }
+    })
+})
+
+const CATEGORY_PALETTE = {
+  Bird: '#2563eb',
+  Reptile: '#059669',
+  Mammal: '#d97706',
+  Amphibian: '#0891b2',
+  Insect: '#9333ea',
+  'Native Species': '#64748b',
+}
+
+const categoryBreakdown = computed(() => {
+  const counts = new Map()
+  for (const card of predictionCards.value) {
+    counts.set(card.category, (counts.get(card.category) || 0) + 1)
+  }
+  const total = Array.from(counts.values()).reduce((a, b) => a + b, 0)
+  if (!total) return []
+  return Array.from(counts.entries())
+    .map(([category, count]) => ({
+      category,
+      count,
+      pct: (count / total) * 100,
+      color: CATEGORY_PALETTE[category] || '#64748b',
+    }))
+    .sort((a, b) => b.count - a.count)
+})
+
+const STATUS_PALETTE = {
+  'Critically Endangered': '#dc2626',
+  Endangered: '#f97316',
+  Vulnerable: '#eab308',
+  Other: '#94a3b8',
+}
+
+const conservationDistribution = computed(() => {
+  const buckets = { 'Critically Endangered': 0, Endangered: 0, Vulnerable: 0, Other: 0 }
+  for (const s of sightings.value) {
+    const status = String(s.conservationStatus || '').toLowerCase()
+    if (status.includes('critical')) buckets['Critically Endangered'] += 1
+    else if (status.includes('endangered')) buckets.Endangered += 1
+    else if (status.includes('vulnerable')) buckets.Vulnerable += 1
+    else buckets.Other += 1
+  }
+  const total = Object.values(buckets).reduce((a, b) => a + b, 0)
+  if (!total) return []
+  return Object.entries(buckets)
+    .filter(([, count]) => count > 0)
+    .map(([label, count]) => ({
+      label,
+      count,
+      pct: (count / total) * 100,
+      color: STATUS_PALETTE[label],
+    }))
+})
+
+const distanceDistribution = computed(() => {
+  const bins = [
+    { range: '0-1 km', count: 0 },
+    { range: '1-2 km', count: 0 },
+    { range: '2-3 km', count: 0 },
+    { range: '3-4 km', count: 0 },
+    { range: '4-5 km', count: 0 },
+  ]
+  for (const s of sightings.value) {
+    const km = Number(s.distanceMetres) / 1000
+    if (!Number.isFinite(km)) continue
+    const idx = Math.min(Math.max(Math.floor(km), 0), bins.length - 1)
+    bins[idx].count += 1
+  }
+  const max = Math.max(...bins.map((b) => b.count), 1)
+  return bins.map((b) => ({ ...b, pct: (b.count / max) * 100 }))
+})
+
+const SEVERITY_PALETTE = { High: '#ef4444', Medium: '#f97316', Low: '#eab308' }
+
+const severityDistribution = computed(() => {
+  const buckets = { High: 0, Medium: 0, Low: 0 }
+  for (const h of hotspotRows.value) {
+    if (buckets[h.level] === undefined) buckets[h.level] = 0
+    buckets[h.level] += 1
+  }
+  const total = Object.values(buckets).reduce((a, b) => a + b, 0)
+  if (!total) return []
+  return Object.entries(buckets)
+    .filter(([, count]) => count > 0)
+    .map(([level, count]) => ({
+      level,
+      count,
+      pct: (count / total) * 100,
+      color: SEVERITY_PALETTE[level] || '#94a3b8',
+    }))
+})
+
+// Build SVG donut segments with cumulative stroke-dashoffset; r=15.9155 keeps the circumference at 100 so pct values can be used directly.
+const buildDonutSegments = (rows) => {
+  let offset = 0
+  return rows.map((row) => {
+    const segment = {
+      ...row,
+      dashArray: `${row.pct} ${100 - row.pct}`,
+      dashOffset: -offset,
+    }
+    offset += row.pct
+    return segment
+  })
+}
+
+const categoryDonut = computed(() => buildDonutSegments(categoryBreakdown.value))
+const severityDonut = computed(() => buildDonutSegments(severityDistribution.value))
+
+const formatClosestKm = (km) => {
+  if (km === null || km === undefined || !Number.isFinite(km)) return 'No data'
+  if (km < 1) return `${Math.round(km * 1000)} m`
+  return `${km.toFixed(1)} km`
+}
+
 // Suburb autocomplete uses the same /api/wildlife-intelligence?action=suburbs endpoint pattern as the other search pages.
 const fetchSuburbs = async (query, limit = 12) => {
   const response = await fetch(`/api/wildlife-intelligence?action=suburbs&q=${encodeURIComponent(query)}&limit=${limit}`)
@@ -638,6 +797,30 @@ onMounted(async () => {
 
       <!-- Analysis results: hidden until /api/wildlife-intelligence returns a payload for the searched postcode. -->
       <template v-if="hasAnalyzed">
+        <!-- Summary stats: at-a-glance numeric overview derived from the existing API payload; does not replace any prior section. -->
+        <section class="insights-overview">
+          <div class="overview-card">
+            <span class="overview-label">Species Tracked</span>
+            <strong class="overview-value">{{ summaryStats.totalSpecies }}</strong>
+            <small>Predicted active near {{ displayLocation }}</small>
+          </div>
+          <div class="overview-card">
+            <span class="overview-label">High Activity Species</span>
+            <strong class="overview-value risk-text-high">{{ summaryStats.highRiskCount }}</strong>
+            <small>{{ summaryStats.totalSpecies ? Math.round((summaryStats.highRiskCount / summaryStats.totalSpecies) * 100) : 0 }}% of predictions</small>
+          </div>
+          <div class="overview-card">
+            <span class="overview-label">Closest Sighting</span>
+            <strong class="overview-value">{{ formatClosestKm(summaryStats.closestKm) }}</strong>
+            <small>From your postcode centroid</small>
+          </div>
+          <div class="overview-card">
+            <span class="overview-label">Detected Hotspots</span>
+            <strong class="overview-value">{{ summaryStats.hotspotCount }}</strong>
+            <small>Spatial clusters within 5 km</small>
+          </div>
+        </section>
+
         <!-- Tabs switch between the two database-derived summary views. -->
         <div class="tab-switch" role="tablist" aria-label="Wildlife intelligence sections">
           <button
@@ -667,6 +850,65 @@ onMounted(async () => {
           </div>
 
           <p v-if="loading && !predictionCards.length" class="status-line">Loading wildlife intelligence...</p>
+
+          <!-- New visualizations: likelihood score ranking + category breakdown donut. Both read from existing API payload. -->
+          <div v-if="likelihoodRanking.length || categoryBreakdown.length" class="insights-grid">
+            <article v-if="likelihoodRanking.length" class="insight-card">
+              <header>
+                <h3>Likelihood Score Ranking</h3>
+                <p>Weighted from local record count, seasonal alignment, and proximity</p>
+              </header>
+              <ul class="ranking-list">
+                <li v-for="(row, index) in likelihoodRanking" :key="row.id" class="ranking-row">
+                  <span class="ranking-index">{{ index + 1 }}</span>
+                  <div class="ranking-meter">
+                    <div class="ranking-meter-head">
+                      <strong>{{ row.name }}</strong>
+                      <span class="risk-badge" :class="row.levelClass">{{ row.level }}</span>
+                    </div>
+                    <div class="meter-track">
+                      <span class="meter-fill" :class="row.levelClass" :style="{ width: `${row.pct}%` }"></span>
+                    </div>
+                  </div>
+                  <span class="ranking-value">{{ row.score.toFixed(1) }}</span>
+                </li>
+              </ul>
+            </article>
+
+            <article v-if="categoryBreakdown.length" class="insight-card">
+              <header>
+                <h3>Species Category Mix</h3>
+                <p>Share of predicted species by taxonomic group</p>
+              </header>
+              <div class="donut-wrap">
+                <svg viewBox="0 0 42 42" class="donut" role="img" aria-label="Species category donut chart">
+                  <circle class="donut-track" cx="21" cy="21" r="15.91549430918954" />
+                  <circle
+                    v-for="seg in categoryDonut"
+                    :key="seg.category"
+                    class="donut-segment"
+                    cx="21"
+                    cy="21"
+                    r="15.91549430918954"
+                    :stroke="seg.color"
+                    :stroke-dasharray="seg.dashArray"
+                    :stroke-dashoffset="seg.dashOffset"
+                  />
+                  <text class="donut-center" x="21" y="21" text-anchor="middle" dominant-baseline="central">
+                    {{ summaryStats.totalSpecies }}
+                  </text>
+                </svg>
+                <ul class="legend-list">
+                  <li v-for="seg in categoryBreakdown" :key="seg.category">
+                    <span class="legend-swatch" :style="{ background: seg.color }"></span>
+                    <span>{{ seg.category }}</span>
+                    <strong>{{ seg.count }}</strong>
+                    <small>{{ seg.pct.toFixed(0) }}%</small>
+                  </li>
+                </ul>
+              </div>
+            </article>
+          </div>
 
           <div v-if="predictionCards.length" class="prediction-grid">
             <article v-for="card in predictionCards" :key="card.id" class="prediction-card">
@@ -714,6 +956,73 @@ onMounted(async () => {
             <p>Spatial clusters based on historical threatened species records</p>
           </div>
 
+          <!-- New visualization: hotspot severity donut chart and category stack. Reuses the existing hotspotRows source. -->
+          <div v-if="severityDistribution.length || hotspotRows.length" class="insights-grid">
+            <article v-if="severityDistribution.length" class="insight-card">
+              <header>
+                <h3>Hotspot Severity Mix</h3>
+                <p>How detected clusters distribute across activity levels</p>
+              </header>
+              <div class="donut-wrap">
+                <svg viewBox="0 0 42 42" class="donut" role="img" aria-label="Hotspot severity donut chart">
+                  <circle class="donut-track" cx="21" cy="21" r="15.91549430918954" />
+                  <circle
+                    v-for="seg in severityDonut"
+                    :key="seg.level"
+                    class="donut-segment"
+                    cx="21"
+                    cy="21"
+                    r="15.91549430918954"
+                    :stroke="seg.color"
+                    :stroke-dasharray="seg.dashArray"
+                    :stroke-dashoffset="seg.dashOffset"
+                  />
+                  <text class="donut-center" x="21" y="21" text-anchor="middle" dominant-baseline="central">
+                    {{ summaryStats.hotspotCount }}
+                  </text>
+                </svg>
+                <ul class="legend-list">
+                  <li v-for="seg in severityDistribution" :key="seg.level">
+                    <span class="legend-swatch" :style="{ background: seg.color }"></span>
+                    <span>{{ seg.level }} activity</span>
+                    <strong>{{ seg.count }}</strong>
+                    <small>{{ seg.pct.toFixed(0) }}%</small>
+                  </li>
+                </ul>
+              </div>
+            </article>
+
+            <article v-if="hotspotRows.length" class="insight-card">
+              <header>
+                <h3>Hotspot Records by Category</h3>
+                <p>Number of threatened-species records per dominant category</p>
+              </header>
+              <ul class="ranking-list">
+                <li v-for="row in hotspotRows" :key="row.category" class="ranking-row">
+                  <span class="ranking-index" :style="{ background: CATEGORY_PALETTE[row.category] || '#64748b' }">
+                    {{ row.category.charAt(0) }}
+                  </span>
+                  <div class="ranking-meter">
+                    <div class="ranking-meter-head">
+                      <strong>{{ row.category }}</strong>
+                      <span class="risk-badge" :class="row.risk">{{ row.level }}</span>
+                    </div>
+                    <div class="meter-track">
+                      <span
+                        class="meter-fill"
+                        :style="{
+                          width: `${Math.min(100, (row.count / Math.max(1, Math.max(...hotspotRows.map((r) => r.count)))) * 100)}%`,
+                          background: CATEGORY_PALETTE[row.category] || '#64748b',
+                        }"
+                      ></span>
+                    </div>
+                  </div>
+                  <span class="ranking-value">{{ row.count }}</span>
+                </li>
+              </ul>
+            </article>
+          </div>
+
           <div class="hotspot-map" aria-label="Activity hotspot map">
             <span class="map-grid"></span>
             <span class="home-dot">You</span>
@@ -742,6 +1051,54 @@ onMounted(async () => {
                 <p>{{ row.count }} threatened species records</p>
               </div>
               <span>{{ formatKm(row.averageDistance) }}<small>from you</small></span>
+            </article>
+          </div>
+        </section>
+
+        <!-- Sighting distribution insights: pairs the alert feed with a distance histogram and conservation-status mix from the same payload. -->
+        <section v-if="sightings.length" class="content-panel feed-insights">
+          <div class="panel-head">
+            <h2>Sighting Distribution Insights</h2>
+            <p>How the latest neighbour sightings spread across distance and conservation status</p>
+          </div>
+
+          <div class="insights-grid">
+            <article class="insight-card">
+              <header>
+                <h3>Distance From You</h3>
+                <p>Number of sightings per kilometre band within the 5 km search radius</p>
+              </header>
+              <div class="bar-chart" role="img" aria-label="Sighting distance histogram">
+                <div v-for="bin in distanceDistribution" :key="bin.range" class="bar-column">
+                  <span class="bar-value">{{ bin.count }}</span>
+                  <span class="bar" :style="{ height: `${Math.max(bin.pct, bin.count ? 6 : 0)}%` }"></span>
+                  <span class="bar-label">{{ bin.range }}</span>
+                </div>
+              </div>
+            </article>
+
+            <article v-if="conservationDistribution.length" class="insight-card">
+              <header>
+                <h3>Conservation Status Mix</h3>
+                <p>Composition of sightings by FFG / state threatened-species status</p>
+              </header>
+              <div class="stack-bar" role="img" aria-label="Conservation status stacked bar">
+                <span
+                  v-for="seg in conservationDistribution"
+                  :key="seg.label"
+                  class="stack-segment"
+                  :style="{ width: `${seg.pct}%`, background: seg.color }"
+                  :title="`${seg.label}: ${seg.count}`"
+                ></span>
+              </div>
+              <ul class="legend-list legend-inline">
+                <li v-for="seg in conservationDistribution" :key="seg.label">
+                  <span class="legend-swatch" :style="{ background: seg.color }"></span>
+                  <span>{{ seg.label }}</span>
+                  <strong>{{ seg.count }}</strong>
+                  <small>{{ seg.pct.toFixed(0) }}%</small>
+                </li>
+              </ul>
             </article>
           </div>
         </section>
@@ -1093,6 +1450,328 @@ onMounted(async () => {
 
 .data-note p {
   font-size: clamp(0.98rem, 1.3vw, 1.25rem);
+}
+
+/* Data-driven visualizations: summary stats strip, ranking bars, donut charts, histogram, and stacked bar. All are additive to the existing layout. */
+.insights-overview {
+  margin-top: 58px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 130px;
+  border: 1px solid #dfe3e8;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 22px 24px;
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.06);
+}
+
+.overview-label {
+  color: #6f7282;
+  font-size: 0.95rem;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.overview-value {
+  color: #0b0f19;
+  font-size: 2.4rem;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.overview-value.risk-text-high {
+  color: #b91c1c;
+}
+
+.overview-card small {
+  color: #6f7282;
+  font-weight: 750;
+}
+
+.insights-grid {
+  margin-top: 36px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 28px;
+}
+
+.insight-card {
+  border: 1px solid #dfe3e8;
+  border-radius: 18px;
+  background: #ffffff;
+  padding: 26px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.insight-card header h3 {
+  margin: 0;
+  color: #0b0f19;
+  font-size: 1.25rem;
+  font-weight: 950;
+}
+
+.insight-card header p {
+  margin: 6px 0 0;
+  color: #6f7282;
+  font-weight: 750;
+}
+
+.ranking-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.ranking-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 60px;
+  gap: 14px;
+  align-items: center;
+}
+
+.ranking-index {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #0b0f19;
+  font-weight: 950;
+}
+
+.ranking-meter {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ranking-meter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ranking-meter-head strong {
+  color: #0b0f19;
+  font-size: 1rem;
+  font-weight: 950;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranking-meter-head .risk-badge {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+}
+
+.meter-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  overflow: hidden;
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #2563eb;
+  transition: width 280ms ease;
+}
+
+.meter-fill.risk-high {
+  background: #ef4444;
+}
+
+.meter-fill.risk-medium {
+  background: #f97316;
+}
+
+.meter-fill.risk-low {
+  background: #eab308;
+}
+
+.ranking-value {
+  color: #0b0f19;
+  font-weight: 950;
+  text-align: right;
+}
+
+.donut-wrap {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 26px;
+  align-items: center;
+}
+
+.donut {
+  width: 100%;
+  max-width: 180px;
+  height: auto;
+}
+
+.donut .donut-track {
+  fill: transparent;
+  stroke: #f1f5f9;
+  stroke-width: 5;
+}
+
+.donut .donut-segment {
+  fill: transparent;
+  stroke-width: 5;
+  transition: stroke-dasharray 280ms ease;
+  transform-origin: center;
+  transform: rotate(-90deg);
+}
+
+.donut .donut-center {
+  font-size: 9px;
+  font-weight: 950;
+  fill: #0b0f19;
+}
+
+.legend-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.legend-list li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  color: #0b0f19;
+  font-weight: 850;
+}
+
+.legend-list li small {
+  color: #6f7282;
+  font-weight: 750;
+}
+
+.legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.legend-inline {
+  margin-top: 14px;
+  grid-template-columns: 1fr;
+}
+
+.bar-chart {
+  height: 220px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: end;
+  gap: 18px;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 4px;
+}
+
+.bar-column {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.bar-column .bar {
+  width: 100%;
+  max-width: 60px;
+  min-height: 4px;
+  border-radius: 8px 8px 0 0;
+  background: #2563eb;
+  transition: height 280ms ease;
+}
+
+.bar-column .bar-value {
+  color: #0b0f19;
+  font-weight: 950;
+}
+
+.bar-column .bar-label {
+  color: #6f7282;
+  font-weight: 750;
+  font-size: 0.9rem;
+}
+
+.stack-bar {
+  display: flex;
+  height: 24px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #f1f5f9;
+}
+
+.stack-segment {
+  display: block;
+  height: 100%;
+  transition: width 280ms ease;
+}
+
+.feed-insights {
+  margin-top: 58px;
+}
+
+@media (max-width: 1180px) {
+  .insights-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .insights-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .donut-wrap {
+    grid-template-columns: 160px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .insights-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .donut-wrap {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .ranking-row {
+    grid-template-columns: 28px minmax(0, 1fr) 48px;
+  }
+
+  .bar-chart {
+    height: 180px;
+    gap: 10px;
+  }
 }
 
 /* Result navigation: hidden before Analyze, then switches between DB prediction and hotspot summaries. */
