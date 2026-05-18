@@ -9,6 +9,10 @@ import { getCurrentUser } from '../utils/auth'
   - Fetches user-scoped metrics (streak, guardian contribution, ranking) from /api/scoreboard.
   - Fetches public leaderboard snapshots via action=leaderboard.
   - Keeps both experiences in one component while preserving route-specific UI behavior.
+  - Epic 9 UI contract:
+    1) Dashboard mode explains personal containment behavior with postcode-aware context.
+    2) Leaderboard mode exposes community ranking without requiring chart-side recomputation.
+    3) Displayed percentages and ranks must be direct API values, not frontend-derived substitutes.
 */
 
 const route = useRoute()

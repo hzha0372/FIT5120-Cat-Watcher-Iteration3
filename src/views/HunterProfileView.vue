@@ -12,6 +12,10 @@ import { getCurrentUser } from '../utils/auth'
   - Displays numeric result data only from the API payload: profile score, roaming hours, prey rate, adjusted encounter estimate, and local species record rows.
   - Shows species names/statuses returned from species_cache for the logged-in user's postcode, with localStorage used only as a "latest result" cache.
   - Explains the Cat Tracker SA formula beside the database-backed threatened species result so the displayed number can be traced.
+  - Epic 9 UI contract:
+    1) Frontend collects answers and renders copy, but backend owns all final numbers.
+    2) Result cards must remain explainable (formula text + source labels + API evidence).
+    3) Local cache improves continuity after refresh, but never replaces server truth when new responses arrive.
 */
 
 const user = ref(getCurrentUser())

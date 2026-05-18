@@ -10,6 +10,11 @@ import { Pool } from 'pg'
   - Returns every displayed numeric result used by HunterProfileView.vue: score, roamingHours, preyRatePerDay, recordCount, and monthlyEncounters.
   - Keeps profile descriptions/actions as deterministic rule copy because the database screenshots do not include a profile-copy table.
   - Infers prey category from species names because species_cache does not expose a taxon_type column.
+  - Epic 9 intent:
+    1) Convert five behavior answers into a transparent risk score/profile.
+    2) Bind that profile to local postcode context and threatened-species evidence.
+    3) Compute a monthly encounter estimate with an explicit formula shown in UI.
+    4) Return fully computed values so frontend only renders, never invents numbers.
 */
 /* eslint-env node */
 /* global process, Buffer */

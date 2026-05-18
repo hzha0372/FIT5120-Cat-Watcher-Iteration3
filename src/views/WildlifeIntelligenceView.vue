@@ -11,6 +11,11 @@ import { getCurrentUser } from '../utils/auth'
   - Keeps Wikipedia image lookup as a visual enhancement only; images are not used for any score, count, percentage, distance, or database decision.
   - Presents database-backed prediction cards, activity hotspots, and the Neighbour Wildlife Alert Feed from species_cache, species_sightings, suburb_demographics, and reserves.
   - Keeps the historical-data note visible by default, while avoiding a hard-coded postcode/suburb until the user analyzes an entered location.
+  - Epic 10 UI contract:
+    1) User-triggered analysis only: no silent default location analysis.
+    2) Predictions and hotspots are treated as backend model outputs and rendered as-is.
+    3) Visual assets (images, labels, decorative map dots) must not alter numeric risk outcomes.
+    4) Report flow remains a supplemental write path; the intelligence panels remain evidence-first.
 */
 
 const user = ref(getCurrentUser())

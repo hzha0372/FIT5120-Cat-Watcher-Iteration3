@@ -9,6 +9,11 @@ import { Pool } from 'pg'
   - Centralizes multiple scoreboard-related actions behind one API contract.
   - Includes authentication handlers plus community analytics reads/writes.
   - Keeps auth hashing and scoreboard calculations in the same service boundary for consistency.
+  - Epic 9 intent:
+    1) Provide personal containment performance metrics for the logged-in user.
+    2) Provide suburb/community leaderboard rankings from real roaming_log data.
+    3) Accept log writes that update future scoreboard calculations.
+    4) Keep authentication and score computation in one service so protected pages stay consistent.
 */
 let scoreboardDataHandler
 {

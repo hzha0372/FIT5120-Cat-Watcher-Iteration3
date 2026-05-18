@@ -295,6 +295,13 @@ const normalizeHotspotRow = (row) => ({
 })
 
 // Main feed endpoint: resolves the searched location and loads all numeric page sections from database queries.
+// Main Epic 10 read path.
+// Input: userId and/or postcode.
+// Output: one cohesive payload containing:
+// - nearby sightings feed (recent evidence),
+// - predicted activity cards (this-week likelihood),
+// - hotspot rows (spatial density clusters),
+// - resolved user/suburb context used for all 5km calculations.
 const wildlifeFeedHandler = async (req, res) => {
   try {
     const db = getPool()
@@ -459,6 +466,9 @@ const wildlifeFeedHandler = async (req, res) => {
     )
 
     // Predictions are scored only from nearby species_cache records: volume, seasonal week match, and distance from the searched centroid.
+    // Prediction model (explainable weighted scoring):
+    // frequency_weight(45%) + seasonal_weight(35%) + distance_weight(20%)
+    // then bucketed to High/Medium/Low thresholds for UI labels.
     const predictionsResult = await db.query(
       `WITH home AS (
          SELECT ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS geom
@@ -557,6 +567,11 @@ const wildlifeFeedHandler = async (req, res) => {
     )
 
     // Hotspots bucket nearby species_cache coordinates into small grid cells; counts/severity/distance are all SQL-derived.
+    // Hotspot model:
+    // spatially bucket threatened points on a fixed grid,
+    // count density per bucket,
+    // infer dominant category,
+    // assign severity level by count thresholds.
     const hotspotsResult = await db.query(
       `WITH home AS (
          SELECT
@@ -651,6 +666,8 @@ const wildlifeFeedHandler = async (req, res) => {
 }
 
 // Species picker data for the retained self-report API flow, sourced only from threatened species_cache rows.
+// Report-form species autocomplete.
+// Returns threatened options only, so report submissions can stay aligned with Epic 10 scope.
 const wildlifeSpeciesOptionsHandler = async (req, res) => {
   try {
     const q = cleanText(req.query?.q)
@@ -708,6 +725,8 @@ const wildlifeSpeciesOptionsHandler = async (req, res) => {
 }
 
 // Suburb autocomplete follows the same Victorian suburb_demographics lookup pattern used by Risk Map and Photo Identifier.
+// Shared VIC suburb/postcode autocomplete endpoint.
+// Used by both Analyze search and self-report location resolution.
 const wildlifeSuburbsHandler = async (req, res) => {
   try {
     const q = cleanText(req.query?.q)
@@ -781,6 +800,11 @@ const wildlifeSuburbsHandler = async (req, res) => {
 }
 
 // Save a self-reported sighting into species_sightings after validating the species and searched Victorian location against the DB.
+// No-photo report write path.
+// Guardrails:
+// - species must resolve to threatened species_cache row,
+// - location must resolve to VIC suburb/postcode centroid,
+// - future dates rejected.
 const wildlifeReportHandler = async (req, res) => {
   try {
     if ((req.method || 'POST').toUpperCase() !== 'POST') {
