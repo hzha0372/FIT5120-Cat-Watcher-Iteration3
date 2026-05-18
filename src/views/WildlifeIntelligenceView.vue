@@ -143,20 +143,24 @@ const predictionCards = computed(() => {
 
 // Hotspot rows are API-derived from species_cache grid buckets.
 const hotspotRows = computed(() => {
-  return hotspotItems.value.map((row) => ({
-    category: normalizeCategory(row.dominantCategory),
-    count: Number(row.recordCount || 0),
-    averageDistance: Number(row.distanceKm),
-    level: String(row.severityLevel || 'Low'),
-    lat: Number(row.lat),
-    lng: Number(row.lng),
-    risk:
-      row.severityLevel === 'High'
-        ? 'risk-high'
-        : row.severityLevel === 'Medium'
-          ? 'risk-medium'
-          : 'risk-low',
-  }))
+  return hotspotItems.value.map((row, index) => {
+    const category = normalizeCategory(row.dominantCategory)
+    return {
+      id: row.hotspotId || `${category}-${index}`,
+      category,
+      count: Number(row.recordCount || 0),
+      averageDistance: Number(row.distanceKm),
+      level: String(row.severityLevel || 'Low'),
+      lat: Number(row.lat),
+      lng: Number(row.lng),
+      risk:
+        row.severityLevel === 'High'
+          ? 'risk-high'
+          : row.severityLevel === 'Medium'
+            ? 'risk-medium'
+            : 'risk-low',
+    }
+  })
 })
 
 // Plot database hotspot coordinates into a simple Figma-style map without introducing any new numeric source.
@@ -277,6 +281,32 @@ const severityDistribution = computed(() => {
       pct: (count / total) * 100,
       color: SEVERITY_PALETTE[level] || '#94a3b8',
     }))
+})
+
+const severityRank = { High: 3, Medium: 2, Low: 1 }
+
+const hotspotCategoryRows = computed(() => {
+  const buckets = new Map()
+  for (const row of hotspotRows.value) {
+    const level = row.level || 'Low'
+    const key = `${row.category}-${level}`
+    const current = buckets.get(key) || {
+      id: key,
+      category: row.category,
+      count: 0,
+      level,
+      risk: row.risk,
+    }
+    current.count += row.count
+    buckets.set(key, current)
+  }
+
+  return Array.from(buckets.values()).sort(
+    (a, b) =>
+      a.category.localeCompare(b.category) ||
+      (severityRank[b.level] || 0) - (severityRank[a.level] || 0) ||
+      b.count - a.count,
+  )
 })
 
 // Build SVG donut segments with cumulative stroke-dashoffset; r=15.9155 keeps the circumference at 100 so pct values can be used directly.
@@ -635,7 +665,7 @@ onMounted(async () => {
           </div>
 
           <!-- New visualization: hotspot severity donut chart and category stack. Reuses the existing hotspotRows source. -->
-          <div v-if="severityDistribution.length || hotspotRows.length" class="insights-grid">
+          <div v-if="severityDistribution.length || hotspotCategoryRows.length" class="insights-grid">
             <article v-if="severityDistribution.length" class="insight-card">
               <header>
                 <h3>Hotspot Severity Mix</h3>
@@ -670,13 +700,13 @@ onMounted(async () => {
               </div>
             </article>
 
-            <article v-if="hotspotRows.length" class="insight-card">
+            <article v-if="hotspotCategoryRows.length" class="insight-card">
               <header>
-                <h3>Hotspot Records by Category</h3>
-                <p>Number of threatened-species records per dominant category</p>
+                <h3>Hotspot Records by Category and Activity</h3>
+                <p>Number of threatened-species records per dominant category and activity level</p>
               </header>
               <ul class="ranking-list">
-                <li v-for="row in hotspotRows" :key="row.category" class="ranking-row">
+                <li v-for="row in hotspotCategoryRows" :key="row.id" class="ranking-row">
                   <span class="ranking-index" :style="{ background: CATEGORY_PALETTE[row.category] || '#64748b' }">
                     {{ row.category.charAt(0) }}
                   </span>
@@ -689,7 +719,7 @@ onMounted(async () => {
                       <span
                         class="meter-fill"
                         :style="{
-                          width: `${Math.min(100, (row.count / Math.max(1, Math.max(...hotspotRows.map((r) => r.count)))) * 100)}%`,
+                          width: `${Math.min(100, (row.count / Math.max(1, Math.max(...hotspotCategoryRows.map((r) => r.count)))) * 100)}%`,
                           background: CATEGORY_PALETTE[row.category] || '#64748b',
                         }"
                       ></span>
@@ -706,7 +736,7 @@ onMounted(async () => {
             <span class="home-dot">You</span>
             <span
               v-for="dot in hotspotDots"
-              :key="dot.category"
+              :key="dot.id"
               class="activity-dot"
               :class="dot.risk"
               :style="{ left: `${dot.left}%`, top: `${dot.top}%`, '--bubble-size': `${dot.size}px` }"
@@ -722,7 +752,7 @@ onMounted(async () => {
 
           <div class="hotspot-list">
             <h3>Detected Hotspots</h3>
-            <article v-for="row in hotspotRows" :key="row.category" class="hotspot-row">
+            <article v-for="row in hotspotRows" :key="row.id" class="hotspot-row">
               <div>
                 <span class="risk-badge" :class="row.risk">{{ row.level }}</span>
                 <strong>{{ row.category }} Species</strong>

@@ -282,79 +282,79 @@ const wildlifeFeedHandler = async (req, res) => {
       [homeLng, homeLat],
     )
 
-    // Hotspots bucket nearby species_cache coordinates into small grid cells; counts/severity/distance are all SQL-derived.
+    // Hotspots bucket nearby species_cache coordinates into small grid cells.
+    // Bucket display distance is averaged from original in-radius records, not the snapped grid point.
     // Hotspot model:
     // spatially bucket threatened points on a fixed grid,
     // count density per bucket,
     // infer dominant category,
     // assign severity level by count thresholds.
     const hotspotsResult = await db.query(
-      `WITH home AS (
-         SELECT
-           ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS geom,
-           ST_SetSRID(ST_MakePoint($1, $2), 4326) AS geom4326
-       ),
-       source AS (
-         SELECT
-           TRIM(sc.vernacular_name) AS common_name,
-           TRIM(sc.scientific_name) AS scientific_name,
-           COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') AS conservation_status,
-           ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326) AS geom
-         FROM species_cache sc
-         CROSS JOIN home
-         WHERE sc.lat IS NOT NULL
-           AND sc.lng IS NOT NULL
-           AND COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') <> 'Not listed'
+	      `WITH home AS (
+	         SELECT
+	           ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS geom
+	       ),
+	       source AS (
+	         SELECT
+	           TRIM(sc.vernacular_name) AS common_name,
+	           TRIM(sc.scientific_name) AS scientific_name,
+	           ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326) AS geom,
+	           ST_Distance(
+	             ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326)::geography,
+	             home.geom
+	           ) AS distance_metres
+	         FROM species_cache sc
+	         CROSS JOIN home
+	         WHERE sc.lat IS NOT NULL
+	           AND sc.lng IS NOT NULL
+	           AND COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') <> 'Not listed'
            AND ST_DWithin(
              ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326)::geography,
              home.geom,
              5000
            )
-       ),
-       gridded AS (
-         SELECT
-           ST_SnapToGrid(geom, 0.01, 0.01) AS grid_geom,
-           common_name,
-           scientific_name
-         FROM source
-       ),
-       bucketed AS (
-         SELECT
-           ST_AsText(grid_geom) AS hotspot_id,
-           ST_Y(ST_Centroid(grid_geom)) AS hotspot_lat,
-           ST_X(ST_Centroid(grid_geom)) AS hotspot_lng,
-           COUNT(*)::int AS record_count,
-           SUM(CASE WHEN (LOWER(common_name) ~ '(bird|duck|parrot|cockatoo|lorikeet|rosella|owl|eagle|hawk|falcon|goshawk|wren|finch|honeyeater|swallow|teal|dove|pigeon|raven|magpie|wagtail|warbler|gull|swan|coot|snipe|quail|rail|heron|ibis|egret|bittern|tern|sandpiper|greenshank|goose)') THEN 1 ELSE 0 END) AS bird_count,
-           SUM(CASE WHEN (LOWER(common_name) ~ '(lizard|skink|gecko|snake|python|turtle|dragon|reptile)') THEN 1 ELSE 0 END) AS reptile_count,
-           SUM(CASE WHEN (LOWER(common_name) ~ '(possum|bandicoot|dunnart|antechinus|rat|mouse|mammal|bat)') THEN 1 ELSE 0 END) AS mammal_count
-         FROM gridded
-         GROUP BY grid_geom
-         HAVING COUNT(*) >= 2
-       )
-       SELECT
-         hotspot_id,
-         hotspot_lat,
-         hotspot_lng,
-         record_count,
-         CASE
-           WHEN bird_count >= reptile_count AND bird_count >= mammal_count THEN 'Bird'
-           WHEN reptile_count >= mammal_count THEN 'Reptile'
-           ELSE 'Mammal'
-         END AS dominant_category,
-         CASE
-           WHEN record_count >= 8 THEN 'High'
-           WHEN record_count >= 4 THEN 'Medium'
-           ELSE 'Low'
-         END AS severity_level,
-         ROUND((
-           ST_Distance(
-             ST_SetSRID(ST_MakePoint(hotspot_lng, hotspot_lat), 4326)::geography,
-             home.geom
-           ) / 1000
-         )::numeric, 2) AS distance_km
-       FROM bucketed
-       CROSS JOIN home
-       ORDER BY record_count DESC, distance_km ASC
+	       ),
+	       gridded AS (
+	         SELECT
+	           ST_SnapToGrid(geom, 0.01, 0.01) AS grid_geom,
+	           common_name,
+	           scientific_name,
+	           geom,
+	           distance_metres
+	         FROM source
+	       ),
+	       bucketed AS (
+	         SELECT
+	           ST_AsText(grid_geom) AS hotspot_id,
+	           ST_Y(ST_Centroid(ST_Collect(geom))) AS hotspot_lat,
+	           ST_X(ST_Centroid(ST_Collect(geom))) AS hotspot_lng,
+	           COUNT(*)::int AS record_count,
+	           LEAST(5.0, ROUND((AVG(distance_metres) / 1000)::numeric, 2)) AS distance_km,
+	           SUM(CASE WHEN (LOWER(common_name) ~ '(bird|duck|parrot|cockatoo|lorikeet|rosella|owl|eagle|hawk|falcon|goshawk|wren|finch|honeyeater|swallow|teal|dove|pigeon|raven|magpie|wagtail|warbler|gull|swan|coot|snipe|quail|rail|heron|ibis|egret|bittern|tern|sandpiper|greenshank|goose)') THEN 1 ELSE 0 END) AS bird_count,
+	           SUM(CASE WHEN (LOWER(common_name) ~ '(lizard|skink|gecko|snake|python|turtle|dragon|reptile)') THEN 1 ELSE 0 END) AS reptile_count,
+	           SUM(CASE WHEN (LOWER(common_name) ~ '(possum|bandicoot|dunnart|antechinus|rat|mouse|mammal|bat)') THEN 1 ELSE 0 END) AS mammal_count
+	         FROM gridded
+	         GROUP BY grid_geom
+	         HAVING COUNT(*) >= 2
+	       )
+	       SELECT
+	         hotspot_id,
+	         hotspot_lat,
+	         hotspot_lng,
+	         record_count,
+	         CASE
+	           WHEN bird_count >= reptile_count AND bird_count >= mammal_count THEN 'Bird'
+	           WHEN reptile_count >= mammal_count THEN 'Reptile'
+	           ELSE 'Mammal'
+	         END AS dominant_category,
+	         CASE
+	           WHEN record_count >= 8 THEN 'High'
+	           WHEN record_count >= 4 THEN 'Medium'
+	           ELSE 'Low'
+	         END AS severity_level,
+	         distance_km
+	       FROM bucketed
+	       ORDER BY record_count DESC, distance_km ASC
        LIMIT 8`,
       [homeLng, homeLat],
     )
