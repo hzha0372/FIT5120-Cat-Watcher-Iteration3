@@ -7,15 +7,14 @@ import { getCurrentUser } from '../utils/auth'
   Wildlife Intelligence View Responsibilities
   - Resolves postcode/suburb input through the same Victorian suburb lookup pattern as the other search pages.
   - Does not auto-analyze on mount; the user must type a postcode/suburb and click Analyze before numeric results render.
-  - Loads numeric wildlife data from /api/wildlife-intelligence after Analyze: record counts, 5km distance values, 30-day sightings, predation percentages, nearest reserve distances, and hotspot severity.
+  - Loads numeric wildlife data from /api/wildlife-intelligence after Analyze: record counts, 5km distance values, nearest reserve distances, and hotspot severity.
   - Keeps Wikipedia image lookup as a visual enhancement only; images are not used for any score, count, percentage, distance, or database decision.
-  - Presents database-backed prediction cards, activity hotspots, and the Neighbour Wildlife Alert Feed from species_cache, species_sightings, suburb_demographics, and reserves.
+  - Presents database-backed prediction cards and activity hotspots from species_cache, suburb_demographics, and reserves.
   - Keeps the historical-data note visible by default, while avoiding a hard-coded postcode/suburb until the user analyzes an entered location.
   - Epic 10 UI contract:
     1) User-triggered analysis only: no silent default location analysis.
     2) Predictions and hotspots are treated as backend model outputs and rendered as-is.
     3) Visual assets (images, labels, decorative map dots) must not alter numeric risk outcomes.
-    4) Report flow remains a supplemental write path; the intelligence panels remain evidence-first.
 */
 
 const user = ref(getCurrentUser())
@@ -24,8 +23,6 @@ const user = ref(getCurrentUser())
 const activeTab = ref('predictions')
 const loading = ref(false)
 const feedError = ref('')
-const reportError = ref('')
-const reportSuccess = ref('')
 const payload = ref(null)
 
 // Search state mirrors the Risk Map style: no default input text, suggestions come from suburb_demographics.
@@ -35,37 +32,17 @@ const selectedLocation = ref(null)
 const suburbSuggestions = ref([])
 const suburbLoading = ref(false)
 
-// No-photo report state is kept for the API-backed report flow, but the current page layout does not expose the button.
-const reportOpen = ref(false)
-const speciesOptions = ref([])
-const speciesLoading = ref(false)
-const speciesSearch = ref('')
-const selectedSpeciesKey = ref('')
-const sightingDate = ref(new Date().toISOString().slice(0, 10))
-const reportLocationInput = ref('')
-const selectedReportLocation = ref(null)
-const reportSuggestions = ref([])
-const reportLocationLoading = ref(false)
-
 // Visual-only image cache. These URLs never drive numeric wildlife intelligence values.
 const cardImageUrls = ref({})
 
 let suburbTimer = null
-let speciesTimer = null
-let reportLocationTimer = null
 
-const sightings = computed(() => payload.value?.sightings || [])
 const predictionItems = computed(() => payload.value?.predictions || [])
 const hotspotItems = computed(() => payload.value?.hotspots || [])
 
 // The analyzed user/location object comes from the API after suburb_demographics resolves the searched postcode.
 const feedUser = computed(() => payload.value?.user || user.value || {})
 const hasAnalyzed = computed(() => Boolean(payload.value?.user?.postcode))
-const selectedSpecies = computed(
-  () => speciesOptions.value.find((item) => item.id === selectedSpeciesKey.value) || null,
-)
-
-const todayIso = () => new Date().toISOString().slice(0, 10)
 
 // Match the other page search inputs: postcode searches display postcode + suburb; suburb searches can display just the suburb.
 const shouldDisplayPostcode = (value) => /^\s*\d/.test(String(value || ''))
@@ -108,46 +85,6 @@ const normalizeCategory = (preyType) => {
   return 'Native Species'
 }
 
-// Visual risk badges are derived from database conservation status or API activity level.
-const riskMeta = (status, index = 0) => {
-  const text = String(status || '').toLowerCase()
-  if (text.includes('critical') || text.includes('endangered')) return { label: 'High', className: 'risk-high' }
-  if (text.includes('vulnerable') && index < 3) return { label: 'Medium', className: 'risk-medium' }
-  if (text.includes('vulnerable')) return { label: 'Low', className: 'risk-low' }
-  return { label: 'Low', className: 'risk-low' }
-}
-
-const sourceClass = (source) => {
-  const text = String(source || '').toLowerCase()
-  if (text.includes('self')) return 'source-self'
-  if (text.includes('database') || text.includes('verified')) return 'source-verified'
-  return 'source-ai'
-}
-
-const preyClass = (preyType) => {
-  const category = normalizeCategory(preyType).toLowerCase().replace(/\s+/g, '-')
-  return `prey-${category}`
-}
-
-const daysAgo = (createdAt) => {
-  const created = new Date(createdAt)
-  if (Number.isNaN(created.getTime())) return 'Recently'
-  const diffMs = Date.now() - created.getTime()
-  if (diffMs < 60_000) return 'Less than a minute ago'
-  const minutes = Math.floor(diffMs / 60_000)
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
-  const days = Math.floor(hours / 24)
-  return `${days} day${days === 1 ? '' : 's'} ago`
-}
-
-const distancePhrase = (metres) => {
-  const value = Number(metres)
-  if (!Number.isFinite(value)) return 'Spotted nearby'
-  return `Spotted approximately ${Math.round(value).toLocaleString()} metres from your home`
-}
-
 const formatKm = (value) => {
   const n = Number(value)
   return Number.isFinite(n) ? `${n.toFixed(1)} km` : 'Database pending'
@@ -187,95 +124,39 @@ const loadPredictionImages = async () => {
   }
 }
 
-// Prediction cards use API rows when available. The fallback only reshapes already-loaded sighting rows, never hard-coded demo data.
+// Prediction cards use API rows only.
 const predictionCards = computed(() => {
-  if (predictionItems.value.length) {
-    return predictionItems.value.map((item) => {
-      const category = normalizeCategory(item.category)
-      const level = String(item.activityLevel || 'Low')
-      return {
-        ...item,
-        category,
-        risk: {
-          label: level,
-          className: level === 'High' ? 'risk-high' : level === 'Medium' ? 'risk-medium' : 'risk-low',
-        },
-        imageClass: `image-${category.toLowerCase().replace(/\s+/g, '-')}`,
-      }
-    })
-  }
-
-  const seen = new Set()
-  const cards = []
-  for (const sighting of sightings.value) {
-    const key = String(sighting.scientificName || sighting.commonName || '').toLowerCase()
-    if (!key || seen.has(key)) continue
-    seen.add(key)
-    const index = cards.length
-    const category = normalizeCategory(sighting.preyType)
-    cards.push({
-      ...sighting,
+  return predictionItems.value.map((item) => {
+    const category = normalizeCategory(item.category)
+    const level = String(item.activityLevel || 'Low')
+    return {
+      ...item,
       category,
-      risk: riskMeta(sighting.conservationStatus, index),
+      risk: {
+        label: level,
+        className: level === 'High' ? 'risk-high' : level === 'Medium' ? 'risk-medium' : 'risk-low',
+      },
       imageClass: `image-${category.toLowerCase().replace(/\s+/g, '-')}`,
-    })
-    if (cards.length >= 6) break
-  }
-  return cards
+    }
+  })
 })
 
-// Hotspot rows are API-derived from species_cache grid buckets; the fallback groups the current database feed if no hotspot rows are returned.
+// Hotspot rows are API-derived from species_cache grid buckets.
 const hotspotRows = computed(() => {
-  if (hotspotItems.value.length) {
-    return hotspotItems.value.map((row) => ({
-      category: normalizeCategory(row.dominantCategory),
-      count: Number(row.recordCount || 0),
-      averageDistance: Number(row.distanceKm),
-      level: String(row.severityLevel || 'Low'),
-      lat: Number(row.lat),
-      lng: Number(row.lng),
-      risk:
-        row.severityLevel === 'High'
-          ? 'risk-high'
-          : row.severityLevel === 'Medium'
-            ? 'risk-medium'
-            : 'risk-low',
-    }))
-  }
-
-  const groups = new Map()
-  for (const sighting of sightings.value) {
-    const category = normalizeCategory(sighting.preyType)
-    const current = groups.get(category) || {
-      category,
-      count: 0,
-      distanceTotal: 0,
-      distanceCount: 0,
-      highCount: 0,
-    }
-    current.count += 1
-    const distanceKm = Number(sighting.distanceMetres) / 1000
-    if (Number.isFinite(distanceKm)) {
-      current.distanceTotal += distanceKm
-      current.distanceCount += 1
-    }
-    if (riskMeta(sighting.conservationStatus).label === 'High') current.highCount += 1
-    groups.set(category, current)
-  }
-
-  return Array.from(groups.values())
-    .map((row) => {
-      const averageDistance = row.distanceCount ? row.distanceTotal / row.distanceCount : null
-      const level = row.highCount >= 2 || row.count >= 8 ? 'High' : row.count >= 3 ? 'Medium' : 'Low'
-      return {
-        ...row,
-        averageDistance,
-        level,
-        risk: level === 'High' ? 'risk-high' : level === 'Medium' ? 'risk-medium' : 'risk-low',
-      }
-    })
-    .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category))
-    .slice(0, 4)
+  return hotspotItems.value.map((row) => ({
+    category: normalizeCategory(row.dominantCategory),
+    count: Number(row.recordCount || 0),
+    averageDistance: Number(row.distanceKm),
+    level: String(row.severityLevel || 'Low'),
+    lat: Number(row.lat),
+    lng: Number(row.lng),
+    risk:
+      row.severityLevel === 'High'
+        ? 'risk-high'
+        : row.severityLevel === 'Medium'
+          ? 'risk-medium'
+          : 'risk-low',
+  }))
 })
 
 // Plot database hotspot coordinates into a simple Figma-style map without introducing any new numeric source.
@@ -317,24 +198,15 @@ const hotspotDots = computed(() => {
   }))
 })
 
-// Data-science visualizations: every computed below is read-only and reuses the existing reactive sources, so the original predictions/hotspots/feed logic is untouched.
+// Data-science visualizations reuse prediction and hotspot sources without changing numeric outcomes.
 const summaryStats = computed(() => {
   const cards = predictionCards.value
-  const sightingsList = sightings.value
   const hotspots = hotspotRows.value
 
   const totalSpecies = cards.length
-  const highRiskCount = cards.filter((c) => c.risk?.label === 'High').length
-  const closestMetres = sightingsList.reduce((min, s) => {
-    const d = Number(s.distanceMetres)
-    if (!Number.isFinite(d)) return min
-    return min === null || d < min ? d : min
-  }, null)
 
   return {
     totalSpecies,
-    highRiskCount,
-    closestKm: closestMetres === null ? null : closestMetres / 1000,
     hotspotCount: hotspots.length,
   }
 })
@@ -387,52 +259,6 @@ const categoryBreakdown = computed(() => {
     .sort((a, b) => b.count - a.count)
 })
 
-const STATUS_PALETTE = {
-  'Critically Endangered': '#dc2626',
-  Endangered: '#f97316',
-  Vulnerable: '#eab308',
-  Other: '#94a3b8',
-}
-
-const conservationDistribution = computed(() => {
-  const buckets = { 'Critically Endangered': 0, Endangered: 0, Vulnerable: 0, Other: 0 }
-  for (const s of sightings.value) {
-    const status = String(s.conservationStatus || '').toLowerCase()
-    if (status.includes('critical')) buckets['Critically Endangered'] += 1
-    else if (status.includes('endangered')) buckets.Endangered += 1
-    else if (status.includes('vulnerable')) buckets.Vulnerable += 1
-    else buckets.Other += 1
-  }
-  const total = Object.values(buckets).reduce((a, b) => a + b, 0)
-  if (!total) return []
-  return Object.entries(buckets)
-    .filter(([, count]) => count > 0)
-    .map(([label, count]) => ({
-      label,
-      count,
-      pct: (count / total) * 100,
-      color: STATUS_PALETTE[label],
-    }))
-})
-
-const distanceDistribution = computed(() => {
-  const bins = [
-    { range: '0-1 km', count: 0 },
-    { range: '1-2 km', count: 0 },
-    { range: '2-3 km', count: 0 },
-    { range: '3-4 km', count: 0 },
-    { range: '4-5 km', count: 0 },
-  ]
-  for (const s of sightings.value) {
-    const km = Number(s.distanceMetres) / 1000
-    if (!Number.isFinite(km)) continue
-    const idx = Math.min(Math.max(Math.floor(km), 0), bins.length - 1)
-    bins[idx].count += 1
-  }
-  const max = Math.max(...bins.map((b) => b.count), 1)
-  return bins.map((b) => ({ ...b, pct: (b.count / max) * 100 }))
-})
-
 const SEVERITY_PALETTE = { High: '#ef4444', Medium: '#f97316', Low: '#eab308' }
 
 const severityDistribution = computed(() => {
@@ -469,12 +295,6 @@ const buildDonutSegments = (rows) => {
 
 const categoryDonut = computed(() => buildDonutSegments(categoryBreakdown.value))
 const severityDonut = computed(() => buildDonutSegments(severityDistribution.value))
-
-const formatClosestKm = (km) => {
-  if (km === null || km === undefined || !Number.isFinite(km)) return 'No data'
-  if (km < 1) return `${Math.round(km * 1000)} m`
-  return `${km.toFixed(1)} km`
-}
 
 // Suburb autocomplete uses the same /api/wildlife-intelligence?action=suburbs endpoint pattern as the other search pages.
 const fetchSuburbs = async (query, limit = 12) => {
@@ -529,7 +349,7 @@ const resolvePostcode = async () => {
   return match.postcode
 }
 
-// Load all numeric page sections in one API call: predictions, hotspots, and the neighbour alert feed.
+// Load the numeric analysis sections in one API call: predictions and hotspots.
 const loadFeed = async (postcode = activePostcode.value) => {
   loading.value = true
   feedError.value = ''
@@ -558,128 +378,12 @@ const loadFeed = async (postcode = activePostcode.value) => {
 // Analyze button handler; keeps results hidden until this succeeds, matching the Risk Map search behavior.
 const submitLocation = async () => {
   feedError.value = ''
-  reportSuccess.value = ''
   try {
     const postcode = await resolvePostcode()
     await loadFeed(postcode)
     activeTab.value = 'predictions'
   } catch (err) {
     feedError.value = err?.message || 'Please enter a valid Victorian postcode or suburb.'
-  }
-}
-
-// Species options are loaded from species_cache for the retained self-report API flow.
-const loadSpeciesOptions = async () => {
-  speciesLoading.value = true
-  try {
-    const q = speciesSearch.value.trim()
-    const response = await fetch(`/api/wildlife-intelligence?action=species-options&q=${encodeURIComponent(q)}&limit=120`)
-    const data = await response.json()
-    speciesOptions.value = data?.results || []
-  } catch {
-    speciesOptions.value = []
-  } finally {
-    speciesLoading.value = false
-  }
-}
-
-const loadReportSuggestions = async () => {
-  const q = reportLocationInput.value.trim()
-  if (q.length < 2) {
-    reportSuggestions.value = []
-    return
-  }
-  reportLocationLoading.value = true
-  try {
-    reportSuggestions.value = await fetchSuburbs(q, 12)
-  } catch {
-    reportSuggestions.value = []
-  } finally {
-    reportLocationLoading.value = false
-  }
-}
-
-const chooseReportLocation = (item) => {
-  selectedReportLocation.value = item
-  reportLocationInput.value = suburbLabel(item, true)
-  reportSuggestions.value = []
-}
-
-const openReport = () => {
-  reportOpen.value = true
-  reportError.value = ''
-  reportSuccess.value = ''
-  sightingDate.value = todayIso()
-  if (!reportLocationInput.value && feedUser.value?.postcode) {
-    selectedReportLocation.value = {
-      postcode: feedUser.value.postcode,
-      name: feedUser.value.suburbName,
-    }
-    reportLocationInput.value = suburbLabel(selectedReportLocation.value, true)
-  }
-  requestAnimationFrame(() => document.querySelector('.report-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-}
-
-// Report submission writes into species_sightings so a self-reported row can return through the same feed query.
-const resolveReportLocation = async () => {
-  const q = reportLocationInput.value.trim()
-  if (selectedReportLocation.value?.postcode && q === suburbLabel(selectedReportLocation.value, true)) {
-    return selectedReportLocation.value
-  }
-  const direct = q.match(/\b(\d{4})\b/)?.[1] || ''
-  if (direct) return { postcode: direct, name: q }
-  if (!q) throw new Error('Please enter the suburb where you spotted it.')
-  const [match] = await fetchSuburbs(q, 1)
-  if (!match?.postcode) throw new Error('Please select a Victorian suburb or enter a valid postcode.')
-  selectedReportLocation.value = match
-  reportLocationInput.value = suburbLabel(match, true)
-  return match
-}
-
-const submitReport = async () => {
-  reportError.value = ''
-  reportSuccess.value = ''
-
-  if (!selectedSpecies.value) {
-    reportError.value = 'Please select a threatened species.'
-    return
-  }
-
-  if (!sightingDate.value) {
-    reportError.value = 'Please enter the sighting date.'
-    return
-  }
-
-  if (new Date(`${sightingDate.value}T00:00:00`).getTime() > new Date(`${todayIso()}T00:00:00`).getTime()) {
-    reportError.value = 'Future dates cannot be reported.'
-    return
-  }
-
-  loading.value = true
-  try {
-    const reportLocation = await resolveReportLocation()
-    const response = await fetch('/api/wildlife-intelligence?action=report', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        scientificName: selectedSpecies.value.scientificName,
-        commonName: selectedSpecies.value.commonName,
-        sightingDate: sightingDate.value,
-        postcode: reportLocation.postcode,
-        suburbName: reportLocation.name,
-      }),
-    })
-    const data = await response.json()
-    if (!response.ok) throw new Error(data?.error || 'Unable to save sighting.')
-    reportSuccess.value = 'Self-reported sighting saved.'
-    selectedSpeciesKey.value = ''
-    sightingDate.value = todayIso()
-    reportOpen.value = false
-    await loadFeed(activePostcode.value || reportLocation.postcode)
-  } catch (err) {
-    reportError.value = err?.message || 'Unable to save sighting.'
-  } finally {
-    loading.value = false
   }
 }
 
@@ -698,34 +402,14 @@ watch(postcodeInput, () => {
   suburbTimer = setTimeout(loadSuburbSuggestions, 180)
 })
 
-// Debounced report helpers are separate from the Analyze search and only touch database-backed species/suburb option endpoints.
-watch(speciesSearch, () => {
-  if (speciesTimer) clearTimeout(speciesTimer)
-  speciesTimer = setTimeout(loadSpeciesOptions, 180)
-})
-
-watch(reportLocationInput, () => {
-  if (
-    selectedReportLocation.value?.postcode &&
-    reportLocationInput.value.trim() === suburbLabel(selectedReportLocation.value, true)
-  ) {
-    reportSuggestions.value = []
-    return
-  }
-  selectedReportLocation.value = null
-  if (reportLocationTimer) clearTimeout(reportLocationTimer)
-  reportLocationTimer = setTimeout(loadReportSuggestions, 180)
-})
-
 watch(predictionCards, () => {
   loadPredictionImages()
 })
 
-// Mount only hydrates auth context and optional visual image cache; it does not fetch numeric intelligence until Analyze is clicked.
+// Mount only hydrates auth context; numeric intelligence still waits for Analyze.
 onMounted(async () => {
   user.value = getCurrentUser()
   activePostcode.value = String(user.value?.postcode || '').trim()
-  await loadSpeciesOptions()
   await loadPredictionImages()
 })
 </script>
@@ -782,7 +466,6 @@ onMounted(async () => {
         </form>
 
         <p v-if="feedError" class="error-line">{{ feedError }}</p>
-        <p v-if="reportSuccess" class="success-line">{{ reportSuccess }}</p>
       </section>
 
       <!-- Data note: always visible, generic provenance text with no hard-coded postcode/suburb. -->
@@ -793,8 +476,8 @@ onMounted(async () => {
         <div>
           <h3>Analysis Based On Historical Data</h3>
           <p>
-            Predictions use species_cache biodiversity records, species_sightings community reports,
-            seasonal observation patterns, and reserve proximity within the searched 5km area.
+            Predictions use species_cache biodiversity records, seasonal observation patterns,
+            and reserve proximity within the searched 5km area.
             Updated from the live database.
           </p>
         </div>
@@ -808,16 +491,6 @@ onMounted(async () => {
             <span class="overview-label">Species Tracked</span>
             <strong class="overview-value">{{ summaryStats.totalSpecies }}</strong>
             <small>Predicted active near {{ displayLocation }}</small>
-          </div>
-          <div class="overview-card">
-            <span class="overview-label">High Activity Species</span>
-            <strong class="overview-value risk-text-high">{{ summaryStats.highRiskCount }}</strong>
-            <small>{{ summaryStats.totalSpecies ? Math.round((summaryStats.highRiskCount / summaryStats.totalSpecies) * 100) : 0 }}% of predictions</small>
-          </div>
-          <div class="overview-card">
-            <span class="overview-label">Closest Sighting</span>
-            <strong class="overview-value">{{ formatClosestKm(summaryStats.closestKm) }}</strong>
-            <small>From your postcode centroid</small>
           </div>
           <div class="overview-card">
             <span class="overview-label">Detected Hotspots</span>
@@ -949,7 +622,7 @@ onMounted(async () => {
             <h3>No nearby threatened activity found</h3>
             <p>
               The database has no threatened species records within 5km of this postcode in the
-              current 30-day window.
+              current analysis.
             </p>
           </article>
         </section>
@@ -1060,95 +733,6 @@ onMounted(async () => {
           </div>
         </section>
 
-        <!-- Sighting distribution insights: pairs the alert feed with a distance histogram and conservation-status mix from the same payload. -->
-        <section v-if="sightings.length" class="content-panel feed-insights">
-          <div class="panel-head">
-            <h2>Sighting Distribution Insights</h2>
-            <p>How the latest neighbour sightings spread across distance and conservation status</p>
-          </div>
-
-          <div class="insights-grid">
-            <article class="insight-card">
-              <header>
-                <h3>Distance From You</h3>
-                <p>Number of sightings per kilometre band within the 5 km search radius</p>
-              </header>
-              <div class="bar-chart" role="img" aria-label="Sighting distance histogram">
-                <div v-for="bin in distanceDistribution" :key="bin.range" class="bar-column">
-                  <span class="bar-value">{{ bin.count }}</span>
-                  <span class="bar" :style="{ height: `${Math.max(bin.pct, bin.count ? 6 : 0)}%` }"></span>
-                  <span class="bar-label">{{ bin.range }}</span>
-                </div>
-              </div>
-            </article>
-
-            <article v-if="conservationDistribution.length" class="insight-card">
-              <header>
-                <h3>Conservation Status Mix</h3>
-                <p>Composition of sightings by FFG / state threatened-species status</p>
-              </header>
-              <div class="stack-bar" role="img" aria-label="Conservation status stacked bar">
-                <span
-                  v-for="seg in conservationDistribution"
-                  :key="seg.label"
-                  class="stack-segment"
-                  :style="{ width: `${seg.pct}%`, background: seg.color }"
-                  :title="`${seg.label}: ${seg.count}`"
-                ></span>
-              </div>
-              <ul class="legend-list legend-inline">
-                <li v-for="seg in conservationDistribution" :key="seg.label">
-                  <span class="legend-swatch" :style="{ background: seg.color }"></span>
-                  <span>{{ seg.label }}</span>
-                  <strong>{{ seg.count }}</strong>
-                  <small>{{ seg.pct.toFixed(0) }}%</small>
-                </li>
-              </ul>
-            </article>
-          </div>
-        </section>
-
-        <!-- Neighbour feed: combined species_sightings and recent species_cache records within the API's 5km/30-day filters. -->
-        <section class="alert-feed">
-          <div class="panel-head">
-            <h2>Neighbour Wildlife Alert Feed</h2>
-            <p>Verified and self-reported sightings within 5km of {{ displayLocation }} from the past 30 days</p>
-          </div>
-
-          <div v-if="sightings.length" class="feed-list">
-            <article
-              v-for="sighting in sightings.slice(0, 8)"
-              :key="sighting.id"
-              class="feed-card"
-              :class="{ self: sighting.selfReported }"
-            >
-              <div>
-                <div class="feed-card-head">
-                  <h3>{{ sighting.commonName }}</h3>
-                  <span class="status-badge">{{ sighting.conservationStatus }}</span>
-                </div>
-                <p>{{ distancePhrase(sighting.distanceMetres) }}</p>
-                <div class="badge-row">
-                  <span class="source-badge" :class="sourceClass(sighting.source)">
-                    {{ sighting.source }}
-                  </span>
-                  <span v-if="sighting.selfReported" class="source-badge source-self">Self-reported</span>
-                  <span class="prey-badge" :class="preyClass(sighting.preyType)">
-                    {{ sighting.preyType }}
-                  </span>
-                  <span class="predation-badge">{{ Number(sighting.predationPct || 0).toFixed(1) }}% predation share</span>
-                </div>
-              </div>
-              <time>{{ daysAgo(sighting.createdAt) }}</time>
-            </article>
-          </div>
-
-          <article v-else class="empty-feed">
-            <h3>No nearby wildlife alerts yet</h3>
-            <p>No verified or self-reported sightings were found within the searched 5km area in the past 30 days.</p>
-          </article>
-        </section>
-
       </template>
     </div>
   </main>
@@ -1247,11 +831,9 @@ onMounted(async () => {
   padding: 60px 16px 78px;
 }
 
-/* Cards: shared white panels for search, result sections, alert feed, and the retained report form styles. */
+/* Cards: shared white panels for search and result sections. */
 .search-card,
-.content-panel,
-.alert-feed,
-.report-panel {
+.content-panel {
   border: 1px solid #dfe3e8;
   border-radius: 22px;
   background: #ffffff;
@@ -1283,8 +865,7 @@ onMounted(async () => {
 
 .search-copy h2,
 .panel-head h2,
-.formula-title h2,
-.report-head h2 {
+.formula-title h2 {
   margin: 0;
   color: #0b0f19;
   font-size: clamp(1.5rem, 2vw, 2.1rem);
@@ -1310,22 +891,18 @@ onMounted(async () => {
   align-items: end;
 }
 
-.postcode-field,
-.report-form label {
+.postcode-field {
   position: relative;
   display: grid;
   gap: 10px;
 }
 
-.postcode-field span,
-.report-form label span {
+.postcode-field span {
   color: #374151;
   font-weight: 950;
 }
 
-.postcode-field input,
-.report-form input,
-.report-form select {
+.postcode-field input {
   width: 100%;
   min-height: 66px;
   border: 1px solid #eef0f4;
@@ -1338,15 +915,11 @@ onMounted(async () => {
   font-weight: 850;
 }
 
-.postcode-field input::placeholder,
-.report-form input::placeholder {
+.postcode-field input::placeholder {
   color: #8b90a0;
 }
 
-.analyze-button,
-.report-button,
-.report-form button,
-.report-head button {
+.analyze-button {
   min-height: 66px;
   border: 1px solid transparent;
   border-radius: 10px;
@@ -1362,14 +935,7 @@ onMounted(async () => {
   background: #030414;
 }
 
-.report-button {
-  color: #111827;
-  background: #ffffff;
-  border-color: #dfe3e8;
-}
-
-.analyze-button:disabled,
-.report-form button:disabled {
+.analyze-button:disabled {
   cursor: not-allowed;
   opacity: 0.64;
 }
@@ -1404,8 +970,7 @@ onMounted(async () => {
   background: #ecfdf5;
 }
 
-.postcode-field small,
-.report-form small {
+.postcode-field small {
   color: #6f7282;
   font-weight: 750;
 }
@@ -1461,7 +1026,7 @@ onMounted(async () => {
 .insights-overview {
   margin-top: 58px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 22px;
 }
 
@@ -1490,10 +1055,6 @@ onMounted(async () => {
   font-size: 2.4rem;
   font-weight: 950;
   line-height: 1;
-}
-
-.overview-value.risk-text-high {
-  color: #b91c1c;
 }
 
 .overview-card small {
@@ -1681,69 +1242,6 @@ onMounted(async () => {
   display: inline-block;
 }
 
-.legend-inline {
-  margin-top: 14px;
-  grid-template-columns: 1fr;
-}
-
-.bar-chart {
-  height: 220px;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  align-items: end;
-  gap: 18px;
-  border-bottom: 1px solid #e5e7eb;
-  padding-bottom: 4px;
-}
-
-.bar-column {
-  position: relative;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.bar-column .bar {
-  width: 100%;
-  max-width: 60px;
-  min-height: 4px;
-  border-radius: 8px 8px 0 0;
-  background: #2563eb;
-  transition: height 280ms ease;
-}
-
-.bar-column .bar-value {
-  color: #0b0f19;
-  font-weight: 950;
-}
-
-.bar-column .bar-label {
-  color: #6f7282;
-  font-weight: 750;
-  font-size: 0.9rem;
-}
-
-.stack-bar {
-  display: flex;
-  height: 24px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: #f1f5f9;
-}
-
-.stack-segment {
-  display: block;
-  height: 100%;
-  transition: width 280ms ease;
-}
-
-.feed-insights {
-  margin-top: 58px;
-}
-
 @media (max-width: 1180px) {
   .insights-overview {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1771,11 +1269,6 @@ onMounted(async () => {
 
   .ranking-row {
     grid-template-columns: 28px minmax(0, 1fr) 48px;
-  }
-
-  .bar-chart {
-    height: 180px;
-    gap: 10px;
   }
 }
 
@@ -1807,9 +1300,7 @@ onMounted(async () => {
   box-shadow: 0 3px 12px rgba(15, 23, 42, 0.08);
 }
 
-.content-panel,
-.alert-feed,
-.report-panel {
+.content-panel {
   margin-top: 0;
 }
 
@@ -2142,121 +1633,6 @@ onMounted(async () => {
   font-weight: 750;
 }
 
-.alert-feed {
-  margin-top: 58px;
-}
-
-.feed-list {
-  margin-top: 34px;
-  display: grid;
-  gap: 18px;
-}
-
-.feed-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 150px;
-  gap: 24px;
-  align-items: start;
-  border: 1px solid #dfe3e8;
-  border-radius: 14px;
-  background: #ffffff;
-  padding: 24px;
-}
-
-.feed-card.self {
-  border-color: #a7f3d0;
-  background: #f0fdf4;
-}
-
-.feed-card-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.feed-card h3 {
-  margin: 0;
-  color: #0b0f19;
-  font-size: 1.25rem;
-  font-weight: 950;
-}
-
-.feed-card p {
-  margin: 10px 0 0;
-  color: #334155;
-  font-weight: 850;
-}
-
-.feed-card time {
-  color: #6f7282;
-  font-weight: 850;
-  text-align: right;
-}
-
-.status-badge,
-.source-badge,
-.prey-badge,
-.predation-badge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 30px;
-  border-radius: 999px;
-  padding: 0 12px;
-  font-size: 0.82rem;
-  font-weight: 950;
-}
-
-.status-badge {
-  color: #991b1b;
-  background: #fee2e2;
-}
-
-.source-self {
-  color: #047857;
-  background: #d1fae5;
-}
-
-.source-verified {
-  color: #5b21b6;
-  background: #ede9fe;
-}
-
-.source-ai {
-  color: #1d4ed8;
-  background: #dbeafe;
-}
-
-.prey-bird {
-  color: #1d4ed8;
-  background: #dbeafe;
-}
-
-.prey-reptile,
-.prey-amphibian {
-  color: #047857;
-  background: #d1fae5;
-}
-
-.prey-mammal {
-  color: #92400e;
-  background: #fef3c7;
-}
-
-.prey-insect,
-.prey-native-species,
-.predation-badge {
-  color: #374151;
-  background: #f3f4f6;
-}
-
-.badge-row {
-  margin-top: 16px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
 .empty-feed {
   margin-top: 34px;
   border: 1px dashed #cbd5e1;
@@ -2277,54 +1653,12 @@ onMounted(async () => {
   color: #6f7282;
 }
 
-.report-panel {
-  margin-top: 58px;
-}
-
 .page-kicker {
   margin: 0 0 8px;
   font-size: 0.8rem;
   font-weight: 950;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.report-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, #030414, #065f46);
-  color: #ffffff;
-  padding: 26px;
-}
-
-.report-head h2 {
-  color: #ffffff;
-}
-
-.report-head button {
-  color: #111827;
-  background: #ffffff;
-}
-
-.report-form {
-  margin-top: 28px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
-}
-
-.report-location-field,
-.report-form button,
-.report-form .error-line {
-  grid-column: span 2;
-}
-
-.report-form button {
-  color: #ffffff;
-  background: #08a84e;
 }
 
 @media (max-width: 1180px) {
@@ -2351,8 +1685,6 @@ onMounted(async () => {
 
   .search-card,
   .content-panel,
-  .alert-feed,
-  .report-panel,
   .formula-card {
     padding: 24px;
   }
@@ -2366,21 +1698,6 @@ onMounted(async () => {
   .tab-switch {
     grid-template-columns: 1fr;
     border-radius: 18px;
-  }
-
-  .feed-card,
-  .report-form {
-    grid-template-columns: 1fr;
-  }
-
-  .feed-card time {
-    text-align: left;
-  }
-
-  .report-location-field,
-  .report-form button,
-  .report-form .error-line {
-    grid-column: auto;
   }
 
   .hotspot-map {
