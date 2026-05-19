@@ -1,14 +1,14 @@
 import { Pool } from 'pg'
 
 // Wildlife Intelligence page JS.
-// Owns prediction/hotspot analysis data and postcode/suburb lookup.
+// Owns prediction analysis data and postcode/suburb lookup.
 // Vercel entry: /api/wildlife-intelligence, with action=feed or action=suburbs.
 /*
   Module Notes
   - Uses species_cache for FFG-listed biodiversity records.
   - Uses suburb_demographics to resolve the searched Victorian postcode centroid before any 5km calculation runs.
   - Uses reserves boundary geometry to calculate nearest-reserve distances with PostGIS geography.
-  - Returns every numeric value rendered by WildlifeIntelligenceView.vue: nearestReserveKm, likelihoodScore, recordCount, distanceKm, and radiusMetres.
+  - Returns every numeric value rendered by WildlifeIntelligenceView.vue: nearestReserveKm, likelihoodScore, and radiusMetres.
   - Does not use hard-coded demo rows for displayed counts, percentages, dates, or distances; the frontend only reshapes these database/API values.
 */
 /* eslint-env node */
@@ -141,21 +141,10 @@ const normalizePredictionRow = (row) => {
   }
 }
 
-// Shape hotspot buckets; recordCount and distanceKm are direct SQL outputs from the species_cache grid query.
-const normalizeHotspotRow = (row) => ({
-  hotspotId: cleanText(row.hotspot_id),
-  severityLevel: cleanText(row.severity_level) || 'Low',
-  recordCount: toInt(row.record_count, 0),
-  dominantCategory: cleanText(row.dominant_category) || 'Native Species',
-  distanceKm: toNum(row.distance_km, null),
-  lat: toNum(row.hotspot_lat, null),
-  lng: toNum(row.hotspot_lng, null),
-})
-
-// Main feed endpoint: resolves the searched location and loads the numeric analysis sections from database queries.
+// Main feed endpoint: resolves the searched location and loads the numeric prediction section from database queries.
 // Main Epic 10 read path.
 // Input: userId and/or postcode.
-// Output: one cohesive payload containing prediction cards, hotspot rows, and resolved user/suburb context.
+// Output: one cohesive payload containing prediction cards and resolved user/suburb context.
 const wildlifeFeedHandler = async (req, res) => {
   try {
     const db = getPool()
@@ -282,83 +271,6 @@ const wildlifeFeedHandler = async (req, res) => {
       [homeLng, homeLat],
     )
 
-    // Hotspots bucket nearby species_cache coordinates into small grid cells.
-    // Bucket display distance is averaged from original in-radius records, not the snapped grid point.
-    // Hotspot model:
-    // spatially bucket threatened points on a fixed grid,
-    // count density per bucket,
-    // infer dominant category,
-    // assign severity level by count thresholds.
-    const hotspotsResult = await db.query(
-	      `WITH home AS (
-	         SELECT
-	           ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography AS geom
-	       ),
-	       source AS (
-	         SELECT
-	           TRIM(sc.vernacular_name) AS common_name,
-	           TRIM(sc.scientific_name) AS scientific_name,
-	           ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326) AS geom,
-	           ST_Distance(
-	             ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326)::geography,
-	             home.geom
-	           ) AS distance_metres
-	         FROM species_cache sc
-	         CROSS JOIN home
-	         WHERE sc.lat IS NOT NULL
-	           AND sc.lng IS NOT NULL
-	           AND COALESCE(NULLIF(TRIM(sc.state_conservation), ''), 'Not listed') <> 'Not listed'
-           AND ST_DWithin(
-             ST_SetSRID(ST_MakePoint(sc.lng::float, sc.lat::float), 4326)::geography,
-             home.geom,
-             5000
-           )
-	       ),
-	       gridded AS (
-	         SELECT
-	           ST_SnapToGrid(geom, 0.01, 0.01) AS grid_geom,
-	           common_name,
-	           scientific_name,
-	           geom,
-	           distance_metres
-	         FROM source
-	       ),
-	       bucketed AS (
-	         SELECT
-	           ST_AsText(grid_geom) AS hotspot_id,
-	           ST_Y(ST_Centroid(ST_Collect(geom))) AS hotspot_lat,
-	           ST_X(ST_Centroid(ST_Collect(geom))) AS hotspot_lng,
-	           COUNT(*)::int AS record_count,
-	           LEAST(5.0, ROUND((AVG(distance_metres) / 1000)::numeric, 2)) AS distance_km,
-	           SUM(CASE WHEN (LOWER(common_name) ~ '(bird|duck|parrot|cockatoo|lorikeet|rosella|owl|eagle|hawk|falcon|goshawk|wren|finch|honeyeater|swallow|teal|dove|pigeon|raven|magpie|wagtail|warbler|gull|swan|coot|snipe|quail|rail|heron|ibis|egret|bittern|tern|sandpiper|greenshank|goose)') THEN 1 ELSE 0 END) AS bird_count,
-	           SUM(CASE WHEN (LOWER(common_name) ~ '(lizard|skink|gecko|snake|python|turtle|dragon|reptile)') THEN 1 ELSE 0 END) AS reptile_count,
-	           SUM(CASE WHEN (LOWER(common_name) ~ '(possum|bandicoot|dunnart|antechinus|rat|mouse|mammal|bat)') THEN 1 ELSE 0 END) AS mammal_count
-	         FROM gridded
-	         GROUP BY grid_geom
-	         HAVING COUNT(*) >= 2
-	       )
-	       SELECT
-	         hotspot_id,
-	         hotspot_lat,
-	         hotspot_lng,
-	         record_count,
-	         CASE
-	           WHEN bird_count >= reptile_count AND bird_count >= mammal_count THEN 'Bird'
-	           WHEN reptile_count >= mammal_count THEN 'Reptile'
-	           ELSE 'Mammal'
-	         END AS dominant_category,
-	         CASE
-	           WHEN record_count >= 8 THEN 'High'
-	           WHEN record_count >= 4 THEN 'Medium'
-	           ELSE 'Low'
-	         END AS severity_level,
-	         distance_km
-	       FROM bucketed
-	       ORDER BY record_count DESC, distance_km ASC
-       LIMIT 8`,
-      [homeLng, homeLat],
-    )
-
     res.status(200).json({
       user: {
         id: user?.id ? toInt(user.id) : null,
@@ -371,7 +283,6 @@ const wildlifeFeedHandler = async (req, res) => {
       },
       radiusMetres: 5000,
       predictions: (predictionsResult.rows || []).map(normalizePredictionRow),
-      hotspots: (hotspotsResult.rows || []).map(normalizeHotspotRow),
       updatedAt: new Date().toISOString(),
     })
   } catch (error) {

@@ -7,20 +7,19 @@ import { getCurrentUser } from '../utils/auth'
   Wildlife Intelligence View Responsibilities
   - Resolves postcode/suburb input through the same Victorian suburb lookup pattern as the other search pages.
   - Does not auto-analyze on mount; the user must type a postcode/suburb and click Analyze before numeric results render.
-  - Loads numeric wildlife data from /api/wildlife-intelligence after Analyze: record counts, 5km distance values, nearest reserve distances, and hotspot severity.
+  - Loads numeric wildlife prediction data from /api/wildlife-intelligence after Analyze: record counts, 5km distance values, and nearest reserve distances.
   - Keeps Wikipedia image lookup as a visual enhancement only; images are not used for any score, count, percentage, distance, or database decision.
-  - Presents database-backed prediction cards and activity hotspots from species_cache, suburb_demographics, and reserves.
+  - Presents database-backed prediction cards from species_cache, suburb_demographics, and reserves.
   - Keeps the historical-data note visible by default, while avoiding a hard-coded postcode/suburb until the user analyzes an entered location.
   - Epic 10 UI contract:
     1) User-triggered analysis only: no silent default location analysis.
-    2) Predictions and hotspots are treated as backend model outputs and rendered as-is.
+    2) Predictions are treated as backend model outputs and rendered as-is.
     3) Visual assets (images, labels, decorative map dots) must not alter numeric risk outcomes.
 */
 
 const user = ref(getCurrentUser())
 
-// View state: predictions/hotspots are hidden until payload is populated by an explicit Analyze request.
-const activeTab = ref('predictions')
+// View state: predictions are hidden until payload is populated by an explicit Analyze request.
 const loading = ref(false)
 const feedError = ref('')
 const payload = ref(null)
@@ -38,7 +37,6 @@ const cardImageUrls = ref({})
 let suburbTimer = null
 
 const predictionItems = computed(() => payload.value?.predictions || [])
-const hotspotItems = computed(() => payload.value?.hotspots || [])
 
 // The analyzed user/location object comes from the API after suburb_demographics resolves the searched postcode.
 const feedUser = computed(() => payload.value?.user || user.value || {})
@@ -141,77 +139,12 @@ const predictionCards = computed(() => {
   })
 })
 
-// Hotspot rows are API-derived from species_cache grid buckets.
-const hotspotRows = computed(() => {
-  return hotspotItems.value.map((row, index) => {
-    const category = normalizeCategory(row.dominantCategory)
-    return {
-      id: row.hotspotId || `${category}-${index}`,
-      category,
-      count: Number(row.recordCount || 0),
-      averageDistance: Number(row.distanceKm),
-      level: String(row.severityLevel || 'Low'),
-      lat: Number(row.lat),
-      lng: Number(row.lng),
-      risk:
-        row.severityLevel === 'High'
-          ? 'risk-high'
-          : row.severityLevel === 'Medium'
-            ? 'risk-medium'
-            : 'risk-low',
-    }
-  })
-})
-
-// Plot database hotspot coordinates into a simple Figma-style map without introducing any new numeric source.
-const hotspotDots = computed(() => {
-  const geoRows = hotspotRows.value.filter((row) => Number.isFinite(row.lat) && Number.isFinite(row.lng))
-  if (geoRows.length) {
-    const baseLat = Number(feedUser.value?.lat)
-    const baseLng = Number(feedUser.value?.lng)
-    const allLats = Number.isFinite(baseLat) ? [baseLat, ...geoRows.map((row) => row.lat)] : geoRows.map((row) => row.lat)
-    const allLngs = Number.isFinite(baseLng) ? [baseLng, ...geoRows.map((row) => row.lng)] : geoRows.map((row) => row.lng)
-    const minLat = Math.min(...allLats)
-    const maxLat = Math.max(...allLats)
-    const minLng = Math.min(...allLngs)
-    const maxLng = Math.max(...allLngs)
-    const latSpan = Math.max(maxLat - minLat, 0.01)
-    const lngSpan = Math.max(maxLng - minLng, 0.01)
-
-    return geoRows.map((row) => {
-      const left = 10 + ((row.lng - minLng) / lngSpan) * 80
-      const top = 90 - ((row.lat - minLat) / latSpan) * 80
-      return {
-        ...row,
-        left: Number.isFinite(left) ? left : 50,
-        top: Number.isFinite(top) ? top : 50,
-        size: row.level === 'High' ? 140 : row.level === 'Medium' ? 108 : 78,
-      }
-    })
-  }
-
-  const positions = [
-    { left: 35, top: 44, size: 138 },
-    { left: 67, top: 30, size: 142 },
-    { left: 77, top: 68, size: 112 },
-    { left: 25, top: 73, size: 74 },
-  ]
-  return hotspotRows.value.map((row, index) => ({
-    ...row,
-    ...(positions[index] || positions[positions.length - 1]),
-  }))
-})
-
-// Data-science visualizations reuse prediction and hotspot sources without changing numeric outcomes.
+// Data-science visualizations reuse prediction sources without changing numeric outcomes.
 const summaryStats = computed(() => {
   const cards = predictionCards.value
-  const hotspots = hotspotRows.value
-
-  const totalSpecies = cards.length
 
   return {
-    totalSpecies,
-    hotspotCount: hotspots.length,
+    totalSpecies: cards.length,
   }
 })
 
@@ -263,52 +196,6 @@ const categoryBreakdown = computed(() => {
     .sort((a, b) => b.count - a.count)
 })
 
-const SEVERITY_PALETTE = { High: '#ef4444', Medium: '#f97316', Low: '#eab308' }
-
-const severityDistribution = computed(() => {
-  const buckets = { High: 0, Medium: 0, Low: 0 }
-  for (const h of hotspotRows.value) {
-    if (buckets[h.level] === undefined) buckets[h.level] = 0
-    buckets[h.level] += 1
-  }
-  const total = Object.values(buckets).reduce((a, b) => a + b, 0)
-  if (!total) return []
-  return Object.entries(buckets)
-    .filter(([, count]) => count > 0)
-    .map(([level, count]) => ({
-      level,
-      count,
-      pct: (count / total) * 100,
-      color: SEVERITY_PALETTE[level] || '#94a3b8',
-    }))
-})
-
-const severityRank = { High: 3, Medium: 2, Low: 1 }
-
-const hotspotCategoryRows = computed(() => {
-  const buckets = new Map()
-  for (const row of hotspotRows.value) {
-    const level = row.level || 'Low'
-    const key = `${row.category}-${level}`
-    const current = buckets.get(key) || {
-      id: key,
-      category: row.category,
-      count: 0,
-      level,
-      risk: row.risk,
-    }
-    current.count += row.count
-    buckets.set(key, current)
-  }
-
-  return Array.from(buckets.values()).sort(
-    (a, b) =>
-      a.category.localeCompare(b.category) ||
-      (severityRank[b.level] || 0) - (severityRank[a.level] || 0) ||
-      b.count - a.count,
-  )
-})
-
 // Build SVG donut segments with cumulative stroke-dashoffset; r=15.9155 keeps the circumference at 100 so pct values can be used directly.
 const buildDonutSegments = (rows) => {
   let offset = 0
@@ -324,7 +211,6 @@ const buildDonutSegments = (rows) => {
 }
 
 const categoryDonut = computed(() => buildDonutSegments(categoryBreakdown.value))
-const severityDonut = computed(() => buildDonutSegments(severityDistribution.value))
 
 // Suburb autocomplete uses the same /api/wildlife-intelligence?action=suburbs endpoint pattern as the other search pages.
 const fetchSuburbs = async (query, limit = 12) => {
@@ -356,7 +242,7 @@ const chooseSuburb = (item) => {
   suburbSuggestions.value = []
 }
 
-// Resolve typed text into a Victorian postcode before any feed/prediction/hotspot query is allowed.
+// Resolve typed text into a Victorian postcode before any feed/prediction query is allowed.
 const resolvePostcode = async () => {
   const q = postcodeInput.value.trim()
   if (
@@ -379,7 +265,7 @@ const resolvePostcode = async () => {
   return match.postcode
 }
 
-// Load the numeric analysis sections in one API call: predictions and hotspots.
+// Load the numeric prediction analysis in one API call.
 const loadFeed = async (postcode = activePostcode.value) => {
   loading.value = true
   feedError.value = ''
@@ -411,7 +297,6 @@ const submitLocation = async () => {
   try {
     const postcode = await resolvePostcode()
     await loadFeed(postcode)
-    activeTab.value = 'predictions'
   } catch (err) {
     feedError.value = err?.message || 'Please enter a valid Victorian postcode or suburb.'
   }
@@ -515,40 +400,17 @@ onMounted(async () => {
 
       <!-- Analysis results: hidden until /api/wildlife-intelligence returns a payload for the searched postcode. -->
       <template v-if="hasAnalyzed">
-        <!-- Summary stats: at-a-glance numeric overview derived from the existing API payload; does not replace any prior section. -->
+        <!-- Summary stats: at-a-glance numeric overview derived from the existing API payload. -->
         <section class="insights-overview">
           <div class="overview-card">
             <span class="overview-label">Species Tracked</span>
             <strong class="overview-value">{{ summaryStats.totalSpecies }}</strong>
             <small>Predicted active near {{ displayLocation }}</small>
           </div>
-          <div class="overview-card">
-            <span class="overview-label">Detected Hotspots</span>
-            <strong class="overview-value">{{ summaryStats.hotspotCount }}</strong>
-            <small>Spatial clusters within 5 km</small>
-          </div>
         </section>
 
-        <!-- Tabs switch between the two database-derived summary views. -->
-        <div class="tab-switch" role="tablist" aria-label="Wildlife intelligence sections">
-          <button
-            type="button"
-            :class="{ active: activeTab === 'predictions' }"
-            @click="activeTab = 'predictions'"
-          >
-            Wildlife Predictions
-          </button>
-          <button
-            type="button"
-            :class="{ active: activeTab === 'hotspots' }"
-            @click="activeTab = 'hotspots'"
-          >
-            Activity Hotspots
-          </button>
-        </div>
-
         <!-- Predictions: species_cache records scored by count, seasonality, and distance in the API. -->
-        <section v-if="activeTab === 'predictions'" class="content-panel prediction-panel">
+        <section class="content-panel prediction-panel">
           <div class="panel-head">
             <h2>Predicted Threatened Species Activity</h2>
             <p>
@@ -656,113 +518,6 @@ onMounted(async () => {
             </p>
           </article>
         </section>
-
-        <!-- Hotspots: API grid buckets from nearby species_cache observations, rendered as a simple Figma-style map. -->
-        <section v-else class="content-panel hotspot-panel">
-          <div class="panel-head">
-            <h2>Wildlife Activity Hotspots</h2>
-            <p>Spatial clusters based on historical threatened species records</p>
-          </div>
-
-          <!-- New visualization: hotspot severity donut chart and category stack. Reuses the existing hotspotRows source. -->
-          <div v-if="severityDistribution.length || hotspotCategoryRows.length" class="insights-grid">
-            <article v-if="severityDistribution.length" class="insight-card">
-              <header>
-                <h3>Hotspot Severity Mix</h3>
-                <p>How detected clusters distribute across activity levels</p>
-              </header>
-              <div class="donut-wrap">
-                <svg viewBox="0 0 42 42" class="donut" role="img" aria-label="Hotspot severity donut chart">
-                  <circle class="donut-track" cx="21" cy="21" r="15.91549430918954" />
-                  <circle
-                    v-for="seg in severityDonut"
-                    :key="seg.level"
-                    class="donut-segment"
-                    cx="21"
-                    cy="21"
-                    r="15.91549430918954"
-                    :stroke="seg.color"
-                    :stroke-dasharray="seg.dashArray"
-                    :stroke-dashoffset="seg.dashOffset"
-                  />
-                  <text class="donut-center" x="21" y="21" text-anchor="middle" dominant-baseline="central">
-                    {{ summaryStats.hotspotCount }}
-                  </text>
-                </svg>
-                <ul class="legend-list">
-                  <li v-for="seg in severityDistribution" :key="seg.level">
-                    <span class="legend-swatch" :style="{ background: seg.color }"></span>
-                    <span>{{ seg.level }} activity</span>
-                    <strong>{{ seg.count }}</strong>
-                    <small>{{ seg.pct.toFixed(0) }}%</small>
-                  </li>
-                </ul>
-              </div>
-            </article>
-
-            <article v-if="hotspotCategoryRows.length" class="insight-card">
-              <header>
-                <h3>Hotspot Records by Category and Activity</h3>
-                <p>Number of threatened-species records per dominant category and activity level</p>
-              </header>
-              <ul class="ranking-list">
-                <li v-for="row in hotspotCategoryRows" :key="row.id" class="ranking-row">
-                  <span class="ranking-index" :style="{ background: CATEGORY_PALETTE[row.category] || '#64748b' }">
-                    {{ row.category.charAt(0) }}
-                  </span>
-                  <div class="ranking-meter">
-                    <div class="ranking-meter-head">
-                      <strong>{{ row.category }}</strong>
-                      <span class="risk-badge" :class="row.risk">{{ row.level }}</span>
-                    </div>
-                    <div class="meter-track">
-                      <span
-                        class="meter-fill"
-                        :style="{
-                          width: `${Math.min(100, (row.count / Math.max(1, Math.max(...hotspotCategoryRows.map((r) => r.count)))) * 100)}%`,
-                          background: CATEGORY_PALETTE[row.category] || '#64748b',
-                        }"
-                      ></span>
-                    </div>
-                  </div>
-                  <span class="ranking-value">{{ row.count }}</span>
-                </li>
-              </ul>
-            </article>
-          </div>
-
-          <div class="hotspot-map" aria-label="Activity hotspot map">
-            <span class="map-grid"></span>
-            <span class="home-dot">You</span>
-            <span
-              v-for="dot in hotspotDots"
-              :key="dot.id"
-              class="activity-dot"
-              :class="dot.risk"
-              :style="{ left: `${dot.left}%`, top: `${dot.top}%`, '--bubble-size': `${dot.size}px` }"
-            ></span>
-          </div>
-
-          <div class="map-legend">
-            <span><i class="home-key"></i>Your Location</span>
-            <span><i class="risk-high"></i>High Activity</span>
-            <span><i class="risk-medium"></i>Medium Activity</span>
-            <span><i class="risk-low"></i>Low Activity</span>
-          </div>
-
-          <div class="hotspot-list">
-            <h3>Detected Hotspots</h3>
-            <article v-for="row in hotspotRows" :key="row.id" class="hotspot-row">
-              <div>
-                <span class="risk-badge" :class="row.risk">{{ row.level }}</span>
-                <strong>{{ row.category }} Species</strong>
-                <p>{{ row.count }} threatened species records</p>
-              </div>
-              <span>{{ formatKm(row.averageDistance) }}<small>from you</small></span>
-            </article>
-          </div>
-        </section>
-
       </template>
     </div>
   </main>
@@ -1052,11 +807,11 @@ onMounted(async () => {
   font-size: clamp(0.98rem, 1.3vw, 1.25rem);
 }
 
-/* Data-driven visualizations: summary stats strip, ranking bars, donut charts, histogram, and stacked bar. All are additive to the existing layout. */
+/* Data-driven visualizations: summary stats strip, ranking bars, and donut charts. */
 .insights-overview {
   margin-top: 58px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 22px;
 }
 
@@ -1273,10 +1028,6 @@ onMounted(async () => {
 }
 
 @media (max-width: 1180px) {
-  .insights-overview {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .insights-grid {
     grid-template-columns: 1fr;
   }
@@ -1302,36 +1053,8 @@ onMounted(async () => {
   }
 }
 
-/* Result navigation: hidden before Analyze, then switches between DB prediction and hotspot summaries. */
-.tab-switch {
-  width: min(100%, 860px);
-  min-height: 74px;
-  margin: 58px auto;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  border-radius: 999px;
-  background: #e8e8ed;
-  padding: 8px;
-}
-
-.tab-switch button {
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: #0b0f19;
-  font: inherit;
-  font-size: clamp(1rem, 1.35vw, 1.4rem);
-  font-weight: 950;
-  cursor: pointer;
-}
-
-.tab-switch button.active {
-  background: #ffffff;
-  box-shadow: 0 3px 12px rgba(15, 23, 42, 0.08);
-}
-
 .content-panel {
-  margin-top: 0;
+  margin-top: 36px;
 }
 
 .prediction-grid {
@@ -1468,154 +1191,6 @@ onMounted(async () => {
   background: #efb400;
 }
 
-.hotspot-map {
-  position: relative;
-  min-height: 690px;
-  margin-top: 48px;
-  overflow: hidden;
-  border: 2px solid #d8e3e6;
-  border-radius: 18px;
-  background:
-    linear-gradient(90deg, rgba(148, 163, 184, 0.22) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(148, 163, 184, 0.22) 1px, transparent 1px),
-    linear-gradient(135deg, #f1fff6, #ecf7ff);
-  background-size: 25% 33.33%, 25% 33.33%, auto;
-}
-
-.home-dot,
-.activity-dot {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  border-radius: 999px;
-}
-
-.home-dot {
-  left: 50%;
-  top: 50%;
-  width: 58px;
-  height: 58px;
-  display: grid;
-  place-items: center;
-  color: transparent;
-  background: #2f7df6;
-  border: 8px solid #ffffff;
-  box-shadow: 0 6px 16px rgba(47, 125, 246, 0.28);
-}
-
-.activity-dot {
-  width: 34px;
-  height: 34px;
-}
-
-.activity-dot::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: var(--bubble-size);
-  height: var(--bubble-size);
-  transform: translate(-50%, -50%);
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.12);
-  filter: blur(1px);
-}
-
-.activity-dot::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: inherit;
-}
-
-.map-legend {
-  margin-top: 32px;
-  display: flex;
-  justify-content: center;
-  gap: 36px;
-  flex-wrap: wrap;
-  color: #0b0f19;
-  font-size: 1.25rem;
-  font-weight: 850;
-}
-
-.map-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.map-legend i {
-  width: 30px;
-  height: 30px;
-  border-radius: 999px;
-  display: inline-block;
-}
-
-.home-key {
-  background: #2f7df6;
-}
-
-.hotspot-list {
-  margin-top: 48px;
-}
-
-.hotspot-list h3 {
-  margin: 0 0 24px;
-  color: #0b0f19;
-  font-size: 1.5rem;
-  font-weight: 950;
-}
-
-.hotspot-row {
-  min-height: 110px;
-  border: 1px solid #dfe3e8;
-  border-radius: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 20px 24px;
-}
-
-.hotspot-row + .hotspot-row {
-  margin-top: 22px;
-}
-
-.hotspot-row > div {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 14px;
-}
-
-.hotspot-row strong {
-  font-size: 1.45rem;
-  font-weight: 950;
-}
-
-.hotspot-row p {
-  flex-basis: 100%;
-  margin: 0;
-  color: #6f7282;
-  font-size: 1.15rem;
-  font-weight: 750;
-}
-
-.hotspot-row > span {
-  display: grid;
-  justify-items: end;
-  color: #0b0f19;
-  font-size: 1.3rem;
-  font-weight: 950;
-}
-
-.hotspot-row small {
-  color: #6f7282;
-  font-size: 0.95rem;
-  font-weight: 750;
-}
-
 .formula-card {
   margin-top: 58px;
   border: 1px solid #d7d9f0;
@@ -1725,13 +1300,5 @@ onMounted(async () => {
     grid-template-columns: 1fr;
   }
 
-  .tab-switch {
-    grid-template-columns: 1fr;
-    border-radius: 18px;
-  }
-
-  .hotspot-map {
-    min-height: 440px;
-  }
 }
 </style>
