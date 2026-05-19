@@ -411,74 +411,7 @@ onMounted(async () => {
 
         <!-- Predictions: species_cache records scored by count, seasonality, and distance in the API. -->
         <section class="content-panel prediction-panel">
-          <div class="panel-head">
-            <h2>Predicted Threatened Species Activity</h2>
-            <p>
-              Species most likely to be active near {{ displayLocation }} this week
-              ({{ weekRange }})
-            </p>
-          </div>
-
           <p v-if="loading && !predictionCards.length" class="status-line">Loading wildlife intelligence...</p>
-
-          <!-- New visualizations: likelihood score ranking + category breakdown donut. Both read from existing API payload. -->
-          <div v-if="likelihoodRanking.length || categoryBreakdown.length" class="insights-grid">
-            <article v-if="likelihoodRanking.length" class="insight-card">
-              <header>
-                <h3>Likelihood Score Ranking</h3>
-                <p>Weighted from local record count, seasonal alignment, and proximity</p>
-              </header>
-              <ul class="ranking-list">
-                <li v-for="(row, index) in likelihoodRanking" :key="row.id" class="ranking-row">
-                  <span class="ranking-index">{{ index + 1 }}</span>
-                  <div class="ranking-meter">
-                    <div class="ranking-meter-head">
-                      <strong>{{ row.name }}</strong>
-                      <span class="risk-badge" :class="row.levelClass">{{ row.level }}</span>
-                    </div>
-                    <div class="meter-track">
-                      <span class="meter-fill" :class="row.levelClass" :style="{ width: `${row.pct}%` }"></span>
-                    </div>
-                  </div>
-                  <span class="ranking-value">{{ row.score.toFixed(1) }}</span>
-                </li>
-              </ul>
-            </article>
-
-            <article v-if="categoryBreakdown.length" class="insight-card">
-              <header>
-                <h3>Species Category Mix</h3>
-                <p>Share of predicted species by taxonomic group</p>
-              </header>
-              <div class="donut-wrap">
-                <svg viewBox="0 0 42 42" class="donut" role="img" aria-label="Species category donut chart">
-                  <circle class="donut-track" cx="21" cy="21" r="15.91549430918954" />
-                  <circle
-                    v-for="seg in categoryDonut"
-                    :key="seg.category"
-                    class="donut-segment"
-                    cx="21"
-                    cy="21"
-                    r="15.91549430918954"
-                    :stroke="seg.color"
-                    :stroke-dasharray="seg.dashArray"
-                    :stroke-dashoffset="seg.dashOffset"
-                  />
-                  <text class="donut-center" x="21" y="21" text-anchor="middle" dominant-baseline="central">
-                    {{ summaryStats.totalSpecies }}
-                  </text>
-                </svg>
-                <ul class="legend-list">
-                  <li v-for="seg in categoryBreakdown" :key="seg.category">
-                    <span class="legend-swatch" :style="{ background: seg.color }"></span>
-                    <span>{{ seg.category }}</span>
-                    <strong>{{ seg.count }}</strong>
-                    <small>{{ seg.pct.toFixed(0) }}%</small>
-                  </li>
-                </ul>
-              </div>
-            </article>
-          </div>
 
           <div v-if="predictionCards.length" class="prediction-grid">
             <article v-for="card in predictionCards" :key="card.id" class="prediction-card">
